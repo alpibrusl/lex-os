@@ -1,0 +1,18 @@
+{
+  "goal": {
+    "description": "the single most dangerous config: sudo + open internet + no human",
+    "done_signal": null
+  },
+  "grant": {
+    "filesystem": "Full",
+    "network": "Full",
+    "exec": "Full"
+  },
+  "budget": {
+    "wall_clock_secs": 600,
+    "max_commands": 100,
+    "max_money_cents": 0,
+    "max_api_calls": 50
+  },
+  "isolation_floor": "MicroVm"
+}

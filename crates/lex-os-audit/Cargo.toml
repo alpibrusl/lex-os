@@ -1,0 +1,18 @@
+[package]
+name = "lex-os-audit"
+description = "Tamper-evident, hash-chained external audit log for the lex-os runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
