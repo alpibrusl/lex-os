@@ -97,6 +97,16 @@ enum Cmd {
         #[command(subcommand)]
         what: AuditCmd,
     },
+    /// Type-check an agent Lex program against a manifest grant and
+    /// refuse it if its effects exceed the grant — the type-check wall
+    /// (demo Attempt 1), run *before* the program executes.
+    Check {
+        /// Manifest JSON whose grant + egress the program is checked against.
+        #[arg(long)]
+        grant: PathBuf,
+        /// The agent `.lex` program to check.
+        program: PathBuf,
+    },
     /// Emit the acli command tree for agent discovery.
     Introspect,
 }
@@ -153,6 +163,7 @@ fn main() {
         } => cmd_resolve(&fmt, manifest, namespaces_only, offline),
         Cmd::Manifest { what } => cmd_manifest(&fmt, what),
         Cmd::Audit { what } => cmd_audit(&fmt, what),
+        Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
         Cmd::Introspect => cmd_introspect(&fmt),
     };
     std::process::exit(code.code());
@@ -426,6 +437,50 @@ fn cmd_audit(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
     }
 }
 
+fn cmd_check(fmt: &OutputFormat, grant: PathBuf, program: PathBuf) -> ExitCode {
+    let start = Instant::now();
+    let manifest = match std::fs::read_to_string(&grant)
+        .map_err(anyhow::Error::from)
+        .and_then(|t| Ok(Manifest::from_json(&t)?))
+    {
+        Ok(m) => m,
+        Err(e) => {
+            return emit_err(
+                fmt,
+                "check",
+                ExitCode::InvalidArgs,
+                &format!("bad manifest: {e}"),
+            )
+        }
+    };
+    let src = match std::fs::read_to_string(&program) {
+        Ok(s) => s,
+        Err(e) => return emit_err(fmt, "check", ExitCode::NotFound, &e.to_string()),
+    };
+    match lex_os_check::check_source_against_manifest(&src, &manifest) {
+        Ok(report) => {
+            let data = json!({
+                "ok": true,
+                "grant": manifest.grant.pretty(),
+                "effects": report.effects,
+                "net_hosts": report.net_hosts,
+            });
+            emit(
+                &success_envelope("check", data, VERSION, Some(start), None),
+                fmt,
+            );
+            ExitCode::Success
+        }
+        // The wall: a program exceeding the grant is refused before it
+        // runs. Grant violations are a precondition failure; parse/type
+        // errors are invalid input.
+        Err(e @ lex_os_check::CheckError::GrantViolation(_)) => {
+            emit_err(fmt, "check", ExitCode::PreconditionFailed, &e.to_string())
+        }
+        Err(e) => emit_err(fmt, "check", ExitCode::InvalidArgs, &e.to_string()),
+    }
+}
+
 fn cmd_introspect(fmt: &OutputFormat) -> ExitCode {
     let mut tree = CommandTree::new("lex-os", VERSION);
     tree.add_command(
@@ -481,6 +536,18 @@ fn cmd_introspect(fmt: &OutputFormat) -> ExitCode {
                 "Verify a log",
                 "lex-os audit verify --log audit.json",
             )]),
+    );
+    tree.add_command(
+        CommandInfo::new(
+            "check",
+            "Type-check an agent Lex program against a manifest grant; refuse it if its effects exceed the grant.",
+        )
+        .idempotent(true)
+        .add_option("grant", "path", "Manifest JSON to check against.", None)
+        .with_examples(vec![(
+            "Reject a net program under network:none",
+            "lex-os check --grant manifest.json agent.lex",
+        )]),
     );
 
     let data = serde_json::to_value(&tree).unwrap_or(json!({}));
