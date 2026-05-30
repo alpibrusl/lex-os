@@ -19,8 +19,13 @@
 //!    [`SimulatedPerimeter`] that enforces the policy in-process so the
 //!    mediation loop is testable everywhere.
 
-use lex_os_manifest::{Dimension, Grant, IsolationFloor, Level};
+use lex_os_manifest::{Dimension, Grant, IsolationFloor, Level, Manifest};
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "firecracker")]
+mod firecracker;
+#[cfg(feature = "firecracker")]
+pub use firecracker::FirecrackerPerimeter;
 
 /// Network posture derived from the network trust level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +45,7 @@ pub enum NetEgress {
 /// The concrete enforcement posture for a box. Every field is *derived*
 /// from the grant, never set independently — that is what keeps the
 /// declaration and the enforcement in lockstep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPolicy {
     /// May the box read its filesystem at all?
     pub fs_readable: bool,
@@ -52,10 +57,16 @@ pub struct SandboxPolicy {
     pub exec_allowed: bool,
     /// The minimum isolation backend strength this policy needs.
     pub required_floor: IsolationFloor,
+    /// The egress allowlist: host or `host:port` entries that the box
+    /// may reach when `net_egress == Allowlist`. Empty unless populated
+    /// via [`SandboxPolicy::from_manifest`].
+    pub egress: Vec<String>,
 }
 
 impl SandboxPolicy {
     /// The single source of truth mapping a grant to an OS posture.
+    /// Produces an empty egress list — use [`from_manifest`] to carry the
+    /// allowlist from a full manifest.
     pub fn from_grant(grant: &Grant) -> Self {
         let net_egress = match grant.network {
             Level::None => NetEgress::Denied,
@@ -69,6 +80,31 @@ impl SandboxPolicy {
             net_egress,
             exec_allowed: grant.exec != Level::None,
             required_floor: IsolationFloor::implied_by(grant),
+            egress: Vec::new(),
+        }
+    }
+
+    /// Build a policy from a full manifest, carrying the egress allowlist.
+    pub fn from_manifest(manifest: &Manifest) -> Self {
+        let mut policy = Self::from_grant(&manifest.grant);
+        policy.egress = manifest.egress.clone();
+        policy
+    }
+
+    /// Does the policy permit outbound connections to `host`?
+    ///
+    /// - `Open`: always yes.
+    /// - `Allowlist`: yes if any entry in `self.egress` matches via
+    ///   [`lex_types::trust::host_matches`].
+    /// - Otherwise: no.
+    pub fn permits_host(&self, host: &str) -> bool {
+        match self.net_egress {
+            NetEgress::Open => true,
+            NetEgress::Allowlist => self
+                .egress
+                .iter()
+                .any(|allow| lex_types::trust::host_matches(allow, host)),
+            _ => false,
         }
     }
 
@@ -188,7 +224,7 @@ impl SimulatedPerimeter {
     }
 
     pub fn policy(&self) -> Option<SandboxPolicy> {
-        self.policy
+        self.policy.clone()
     }
 }
 
@@ -221,7 +257,7 @@ impl Perimeter for SimulatedPerimeter {
         if self.state != BoxState::Alive {
             return Err(PerimeterError::NotAlive);
         }
-        let policy = self.policy.ok_or(PerimeterError::NotAlive)?;
+        let policy = self.policy.clone().ok_or(PerimeterError::NotAlive)?;
         if policy.permits(dim, required) {
             Ok(())
         } else {
@@ -303,5 +339,23 @@ mod tests {
             perim.check(Dimension::Filesystem, Level::ReadOnly),
             Err(PerimeterError::NotAlive)
         ));
+    }
+
+    #[test]
+    fn from_manifest_carries_egress_and_permits_host() {
+        use lex_os_manifest::{Budget, Goal};
+        let manifest = Manifest::new(
+            Goal::new("test"),
+            Grant::new(Level::ReadWrite, Level::Allowlist, Level::None),
+            Budget::research_default(),
+        )
+        .with_egress(vec!["results.demo.internal:443".into()]);
+        let policy = SandboxPolicy::from_manifest(&manifest);
+        assert_eq!(policy.net_egress, NetEgress::Allowlist);
+        assert_eq!(policy.egress, vec!["results.demo.internal:443"]);
+        // The allowlisted host is permitted.
+        assert!(policy.permits_host("results.demo.internal"));
+        // A host not in the list is refused.
+        assert!(!policy.permits_host("evil.com"));
     }
 }

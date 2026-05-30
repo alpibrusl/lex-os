@@ -95,6 +95,13 @@ impl Default for DemoAgent {
 
 impl DemoAgent {
     pub fn new() -> Self {
+        // Agent attempts to widen its own grant — the narrowing-invariant
+        // wall will block this and log `NarrowingBlocked`.
+        let widen_attempt = AgentAction::ProposeChild(Box::new(Manifest::new(
+            Goal::new("widen"),
+            Grant::top(),
+            Budget::research_default(),
+        )));
         let plan = vec![
             AgentAction::Run("fs.list".into()),
             AgentAction::Run("fs.read".into()),
@@ -104,6 +111,7 @@ impl DemoAgent {
             AgentAction::Run("net.fetch".into()), // denied unless network granted
             AgentAction::Run("exec.shell".into()), // denied unless exec granted
             AgentAction::Run("fs.delete_all".into()), // always refused (consequential)
+            widen_attempt,                            // always blocked by narrowing wall
             AgentAction::Run("report.write".into()),
             AgentAction::Done,
         ];
