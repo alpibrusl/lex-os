@@ -150,6 +150,15 @@ pub struct Manifest {
     pub grant: Grant,
     pub budget: Budget,
     pub isolation_floor: IsolationFloor,
+    /// Network egress allowlist: the only hosts the box may reach, as
+    /// `host` or `host:port` entries (a leading `*.` wildcard matches
+    /// subdomains). Empty means no egress unless `grant.network` is
+    /// `full`. This is the data behind the demo grant
+    /// `network: none EXCEPT results.demo.internal:443`, and is what both
+    /// the static type-check (via `Grant::permits_effects_with_allowlist`)
+    /// and the perimeter firewall are derived from.
+    #[serde(default)]
+    pub egress: Vec<String>,
 }
 
 /// Content address of a [`Manifest`].
@@ -176,6 +185,16 @@ pub enum ManifestError {
     Trust(#[from] TrustError),
     #[error("failed to (de)serialize manifest: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error(
+        "egress widening: child manifest adds host `{host}` not present in the parent's egress allowlist (a child may only narrow)"
+    )]
+    EgressWidens { host: String },
+    #[error("budget widening on {field}: child requests {requested} > parent {parent}")]
+    BudgetWidens {
+        field: &'static str,
+        parent: u64,
+        requested: u64,
+    },
 }
 
 impl Manifest {
@@ -186,7 +205,69 @@ impl Manifest {
             grant,
             budget,
             isolation_floor,
+            egress: Vec::new(),
         }
+    }
+
+    /// Set the network egress allowlist (host or `host:port` entries).
+    pub fn with_egress(mut self, hosts: Vec<String>) -> Self {
+        self.egress = hosts;
+        self
+    }
+
+    /// Validate that `child` is a well-formed narrowing of `self` across
+    /// **every** dimension the agent could try to widen (design doc §7
+    /// Attempt 3): the grant (via the trust lattice), the egress
+    /// allowlist (child ⊆ parent), and every budget ceiling
+    /// (child ≤ parent). Returns the first widening as a structured
+    /// error so the supervisor can log a `[BLOCKED:narrowing]` reason.
+    pub fn validate_narrowing(parent: &Manifest, child: &Manifest) -> Result<(), ManifestError> {
+        // Grant: child must be ≤ parent on the trust lattice.
+        Grant::narrow(&parent.grant, &child.grant)?;
+        // Egress: every child host must already be allowed by the parent.
+        for host in &child.egress {
+            let bare = host.split(':').next().unwrap_or(host);
+            let covered = parent
+                .egress
+                .iter()
+                .any(|p| lex_types::trust::host_matches(p, bare));
+            if !covered {
+                return Err(ManifestError::EgressWidens { host: host.clone() });
+            }
+        }
+        // Budgets: no ceiling may exceed the parent's.
+        let checks: [(&'static str, u64, u64); 4] = [
+            (
+                "wall_clock_secs",
+                parent.budget.wall_clock_secs,
+                child.budget.wall_clock_secs,
+            ),
+            (
+                "max_commands",
+                parent.budget.max_commands,
+                child.budget.max_commands,
+            ),
+            (
+                "max_money_cents",
+                parent.budget.max_money_cents,
+                child.budget.max_money_cents,
+            ),
+            (
+                "max_api_calls",
+                parent.budget.max_api_calls,
+                child.budget.max_api_calls,
+            ),
+        ];
+        for (field, p, c) in checks {
+            if c > p {
+                return Err(ManifestError::BudgetWidens {
+                    field,
+                    parent: p,
+                    requested: c,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Build a manifest while raising the isolation floor to the owner's
@@ -241,6 +322,9 @@ impl Manifest {
             grant,
             budget,
             isolation_floor,
+            // The child inherits the parent's egress; narrowing can drop
+            // hosts but never add them, so inheriting is always safe.
+            egress: self.egress.clone(),
         })
     }
 
@@ -260,6 +344,8 @@ impl Manifest {
     pub fn canonical_json(&self) -> String {
         // Build the value explicitly so ordering is deterministic and
         // independent of serde's struct field emission quirks.
+        let mut egress = self.egress.clone();
+        egress.sort();
         let v = serde_json::json!({
             "goal": self.goal.description,
             "done_signal": self.goal.done_signal,
@@ -275,6 +361,7 @@ impl Manifest {
                 "max_api_calls": self.budget.max_api_calls,
             },
             "isolation_floor": self.isolation_floor.as_str(),
+            "egress": egress,
         });
         serde_json::to_string(&v).expect("manifest json is always serializable")
     }
@@ -301,6 +388,101 @@ mod tests {
             Grant::new(Level::ReadWrite, Level::None, Level::None),
             Budget::research_default(),
         )
+    }
+
+    fn demo_parent() -> Manifest {
+        // The demo dispatch: do anything inside, reach exactly one host.
+        Manifest::new(
+            Goal::new("build the service"),
+            Grant::top(),
+            Budget::research_default(),
+        )
+        .with_egress(vec!["results.demo.internal:443".into()])
+    }
+
+    #[test]
+    fn egress_survives_roundtrip_and_affects_content_id() {
+        let m = demo_parent();
+        let back = Manifest::from_json(&m.to_json().unwrap()).unwrap();
+        assert_eq!(back.egress, m.egress);
+        assert_eq!(m.content_id(), back.content_id());
+        // A different allowlist changes the content address.
+        let m2 = m.clone().with_egress(vec!["evil.com".into()]);
+        assert_ne!(m.content_id(), m2.content_id());
+    }
+
+    #[test]
+    fn old_manifests_without_egress_still_deserialize() {
+        // Back-compat: manifests written before the egress field load
+        // with an empty allowlist (serde default).
+        let json = r#"{"goal":{"description":"x","done_signal":null},
+            "grant":{"filesystem":"ReadOnly","network":"None","exec":"None"},
+            "budget":{"wall_clock_secs":1,"max_commands":1,"max_money_cents":0,"max_api_calls":0},
+            "isolation_floor":"Namespace"}"#;
+        let m = Manifest::from_json(json).unwrap();
+        assert!(m.egress.is_empty());
+    }
+
+    #[test]
+    fn narrowing_accepts_subset_and_rejects_added_host() {
+        let parent = demo_parent();
+        // Child drops to a read-only, no-exec grant and keeps a subset of egress.
+        let ok_child = Manifest::new(
+            Goal::new("child"),
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+            Budget::research_default(),
+        )
+        .with_egress(vec!["results.demo.internal".into()]);
+        assert!(Manifest::validate_narrowing(&parent, &ok_child).is_ok());
+
+        // Child tries to add a host the parent never allowed.
+        let bad_child = ok_child.clone().with_egress(vec!["evil.com".into()]);
+        assert!(matches!(
+            Manifest::validate_narrowing(&parent, &bad_child).unwrap_err(),
+            ManifestError::EgressWidens { .. }
+        ));
+    }
+
+    #[test]
+    fn narrowing_rejects_grant_and_budget_widening() {
+        let parent = Manifest::new(
+            Goal::new("p"),
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+            Budget {
+                wall_clock_secs: 100,
+                max_commands: 10,
+                max_money_cents: 0,
+                max_api_calls: 5,
+            },
+        );
+        // Grant widen: child asks for network full.
+        let widen_grant = Manifest::new(
+            Goal::new("c"),
+            Grant::new(Level::ReadOnly, Level::Full, Level::None),
+            parent.budget,
+        );
+        assert!(matches!(
+            Manifest::validate_narrowing(&parent, &widen_grant).unwrap_err(),
+            ManifestError::Trust(_)
+        ));
+        // Budget widen: child asks for more api calls.
+        let widen_budget = Manifest::new(
+            Goal::new("c"),
+            parent.grant,
+            Budget {
+                wall_clock_secs: 100,
+                max_commands: 10,
+                max_money_cents: 0,
+                max_api_calls: 999,
+            },
+        );
+        assert!(matches!(
+            Manifest::validate_narrowing(&parent, &widen_budget).unwrap_err(),
+            ManifestError::BudgetWidens {
+                field: "max_api_calls",
+                ..
+            }
+        ));
     }
 
     #[test]

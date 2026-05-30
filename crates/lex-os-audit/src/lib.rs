@@ -50,6 +50,10 @@ pub enum Event {
     LivenessFailed { detail: String },
     /// The box was destroyed (by the agent or the supervisor).
     Destroyed { reason: String },
+    /// An attempt to widen the grant (rewrite the manifest / spawn a
+    /// child with broader trust) was rejected by the narrowing
+    /// invariant. The demo's `[BLOCKED:narrowing]` line.
+    NarrowingBlocked { reason: String },
     /// The session reached a terminal state.
     SessionEnded { outcome: String },
 }
@@ -171,6 +175,19 @@ impl AuditLog {
         Ok(serde_json::to_string_pretty(&self.entries)?)
     }
 
+    /// Render the log as newline-delimited JSON (one entry per line) for
+    /// a live, tailable viewer — the demo's on-screen external log. Each
+    /// line carries the full chained `Entry` (seq, prev_hash, event,
+    /// hash), so a consumer can verify the chain incrementally.
+    pub fn to_ndjson(&self) -> Result<String, AuditError> {
+        let mut out = String::new();
+        for entry in &self.entries {
+            out.push_str(&serde_json::to_string(entry)?);
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
     pub fn from_json(s: &str) -> Result<Self, AuditError> {
         let entries: Vec<Entry> = serde_json::from_str(s)?;
         Ok(Self { entries })
@@ -259,5 +276,25 @@ mod tests {
         let back = AuditLog::from_json(&json).unwrap();
         assert!(back.verify().is_ok());
         assert_eq!(back.head(), log.head());
+    }
+
+    #[test]
+    fn ndjson_has_one_line_per_entry() {
+        let mut log = AuditLog::new();
+        log.append(Event::CommandDenied {
+            command: "net.fetch".into(),
+            reason: "blocked".into(),
+        });
+        log.append(Event::NarrowingBlocked {
+            reason: "child widens network".into(),
+        });
+        let nd = log.to_ndjson().unwrap();
+        let lines: Vec<&str> = nd.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Each line is independently parseable JSON.
+        for line in lines {
+            let _: serde_json::Value = serde_json::from_str(line).unwrap();
+        }
+        assert!(nd.contains("narrowing_blocked"));
     }
 }

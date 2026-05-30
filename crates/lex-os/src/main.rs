@@ -110,12 +110,27 @@ enum ManifestCmd {
         #[arg(long)]
         manifest: PathBuf,
     },
+    /// Validate that a child manifest only *narrows* a parent (grant,
+    /// egress allowlist, and budgets). Rejects any widening — the
+    /// narrowing-invariant wall (demo Attempt 3).
+    Narrow {
+        #[arg(long)]
+        parent: PathBuf,
+        #[arg(long)]
+        child: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum AuditCmd {
     /// Verify the hash chain of an audit log file.
     Verify {
+        #[arg(long)]
+        log: PathBuf,
+    },
+    /// Render an audit log as newline-delimited JSON (one entry per
+    /// line) for a live, tailable external view.
+    Render {
         #[arg(long)]
         log: PathBuf,
     },
@@ -325,38 +340,89 @@ fn cmd_manifest(fmt: &OutputFormat, what: ManifestCmd) -> ExitCode {
             }
             Err(e) => emit_err(fmt, "manifest.hash", ExitCode::InvalidArgs, &e.to_string()),
         },
+        ManifestCmd::Narrow { parent, child } => {
+            let load = |p: &PathBuf| -> anyhow::Result<Manifest> {
+                Ok(Manifest::from_json(&std::fs::read_to_string(p)?)?)
+            };
+            let (parent, child) = match (load(&parent), load(&child)) {
+                (Ok(p), Ok(c)) => (p, c),
+                (Err(e), _) | (_, Err(e)) => {
+                    return emit_err(
+                        fmt,
+                        "manifest.narrow",
+                        ExitCode::InvalidArgs,
+                        &format!("bad manifest: {e}"),
+                    )
+                }
+            };
+            match Manifest::validate_narrowing(&parent, &child) {
+                Ok(()) => {
+                    let data = json!({
+                        "narrows": true,
+                        "parent": parent.grant.pretty(),
+                        "child": child.grant.pretty(),
+                    });
+                    emit(
+                        &success_envelope("manifest.narrow", data, VERSION, Some(start), None),
+                        fmt,
+                    );
+                    ExitCode::Success
+                }
+                // A widening attempt is the narrowing-invariant wall:
+                // refuse, with the structured reason.
+                Err(e) => emit_err(
+                    fmt,
+                    "manifest.narrow",
+                    ExitCode::PreconditionFailed,
+                    &e.to_string(),
+                ),
+            }
+        }
     }
 }
 
 fn cmd_audit(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
     let start = Instant::now();
-    let AuditCmd::Verify { log } = what;
-    let text = match std::fs::read_to_string(&log) {
+    let (command, log_path) = match &what {
+        AuditCmd::Verify { log } => ("audit.verify", log.clone()),
+        AuditCmd::Render { log } => ("audit.render", log.clone()),
+    };
+    let text = match std::fs::read_to_string(&log_path) {
         Ok(t) => t,
-        Err(e) => return emit_err(fmt, "audit.verify", ExitCode::NotFound, &e.to_string()),
+        Err(e) => return emit_err(fmt, command, ExitCode::NotFound, &e.to_string()),
     };
     let parsed = match AuditLog::from_json(&text) {
         Ok(l) => l,
-        Err(e) => return emit_err(fmt, "audit.verify", ExitCode::InvalidArgs, &e.to_string()),
+        Err(e) => return emit_err(fmt, command, ExitCode::InvalidArgs, &e.to_string()),
     };
-    match parsed.verify() {
-        Ok(()) => {
-            let data = json!({ "verified": true, "entries": parsed.len(), "head": parsed.head() });
-            emit(
-                &success_envelope("audit.verify", data, VERSION, Some(start), None),
-                fmt,
-            );
-            ExitCode::Success
-        }
-        Err(e) => {
+    match what {
+        AuditCmd::Verify { .. } => match parsed.verify() {
+            Ok(()) => {
+                let data =
+                    json!({ "verified": true, "entries": parsed.len(), "head": parsed.head() });
+                emit(
+                    &success_envelope("audit.verify", data, VERSION, Some(start), None),
+                    fmt,
+                );
+                ExitCode::Success
+            }
             // A broken chain is a precondition failure, not a crash.
-            emit_err(
+            Err(e) => emit_err(
                 fmt,
                 "audit.verify",
                 ExitCode::PreconditionFailed,
                 &e.to_string(),
-            )
-        }
+            ),
+        },
+        AuditCmd::Render { .. } => match parsed.to_ndjson() {
+            // NDJSON is meant to be piped to a live viewer, so print it
+            // raw to stdout regardless of --output.
+            Ok(nd) => {
+                print!("{nd}");
+                ExitCode::Success
+            }
+            Err(e) => emit_err(fmt, "audit.render", ExitCode::GeneralError, &e.to_string()),
+        },
     }
 }
 
