@@ -1,0 +1,17 @@
+[package]
+name = "lex-os-resolver"
+description = "Negotiates a trust manifest against the real environment and refuses to downgrade."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+lex-os-manifest.workspace = true
+lex-os-perimeter.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,18 @@
+{
+  "goal": {
+    "description": "analyze sales.csv and write report.md",
+    "done_signal": "REPORT_WRITTEN"
+  },
+  "grant": {
+    "filesystem": "ReadWrite",
+    "network": "None",
+    "exec": "None"
+  },
+  "budget": {
+    "wall_clock_secs": 300,
+    "max_commands": 20,
+    "max_money_cents": 0,
+    "max_api_calls": 0
+  },
+  "isolation_floor": "Namespace"
+}

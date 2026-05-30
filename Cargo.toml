@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lex-os-manifest",
+    "crates/lex-os-audit",
+    "crates/lex-os-perimeter",
+    "crates/lex-os-resolver",
+    "crates/lex-os-supervisor",
+    "crates/lex-os",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+repository = "https://github.com/alpibrusl/lex-os"
+homepage = "https://github.com/alpibrusl/lex-os"
+authors = ["Alpibrupa <https://github.com/alpibrupa>"]
+keywords = ["agent", "runtime", "sandbox", "supervisor", "lex"]
+categories = ["command-line-utilities", "os"]
+
+[workspace.dependencies]
+# Internal crates.
+lex-os-manifest = { path = "crates/lex-os-manifest", version = "0.1.0" }
+lex-os-audit = { path = "crates/lex-os-audit", version = "0.1.0" }
+lex-os-perimeter = { path = "crates/lex-os-perimeter", version = "0.1.0" }
+lex-os-resolver = { path = "crates/lex-os-resolver", version = "0.1.0" }
+lex-os-supervisor = { path = "crates/lex-os-supervisor", version = "0.1.0" }
+
+# Upstream dependency graph (design doc §11): lex-os -> lex-lang -> acli.
+# The trust lattice that drives both the static type check and the
+# supervisor's derived sandbox lives in lex-lang's lex-types crate.
+lex-types = { path = "../lex-lang/crates/lex-types" }
+# acli (Agent-friendly CLI) standard — the binary speaks it so an agent
+# can discover lex-os the same way it discovers any other tool.
+acli = { path = "../acli/sdks/rust" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+hex = "0.4"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,12 @@
+[package]
+name    = "lex-os-manifest"
+version = "0.1.0"
+lex     = "0.9.6"
+
+# The manifest format lives here as a Lex package rather than its own
+# repo (design doc §11): trust dimensions, grants, narrowing-inheritance
+# and the reversibility classification are Lex *types*, and the bounded
+# commands are Lex functions with narrow effect signatures. Promote to
+# its own repo only when something other than lex-os needs to consume it.
+
+[dependencies]
