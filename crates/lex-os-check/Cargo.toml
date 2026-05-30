@@ -1,0 +1,18 @@
+[package]
+name = "lex-os-check"
+description = "Static grant↔effect wall: reject agent Lex code whose effects exceed the manifest grant, before it runs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+lex-os-manifest.workspace = true
+lex-types.workspace = true
+lex-syntax.workspace = true
+lex-ast.workspace = true
+thiserror.workspace = true

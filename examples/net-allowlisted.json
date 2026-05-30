@@ -1,0 +1,10 @@
+{
+  "goal": {
+    "description": "set up the data-processing service and submit the report to the results endpoint",
+    "done_signal": "REPORT_SUBMITTED"
+  },
+  "grant": { "filesystem": "Full", "network": "Allowlist", "exec": "Full" },
+  "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 0, "max_api_calls": 50 },
+  "isolation_floor": "MicroVm",
+  "egress": ["results.demo.internal:443"]
+}
