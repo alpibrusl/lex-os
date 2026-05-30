@@ -144,6 +144,12 @@ enum AuditCmd {
         #[arg(long)]
         log: PathBuf,
     },
+    /// Follow an audit log file, printing new entries as they arrive
+    /// (one NDJSON line per entry). Runs indefinitely; press Ctrl-C to stop.
+    Tail {
+        #[arg(long)]
+        log: PathBuf,
+    },
 }
 
 fn main() {
@@ -393,10 +399,21 @@ fn cmd_manifest(fmt: &OutputFormat, what: ManifestCmd) -> ExitCode {
 }
 
 fn cmd_audit(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
+    // Tail runs forever in its own helper; handle it before the
+    // common read-once path so we don't try to read the file twice.
+    if let AuditCmd::Tail { log } = what {
+        cmd_audit_tail(&log)
+    } else {
+        cmd_audit_once(fmt, what)
+    }
+}
+
+fn cmd_audit_once(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
     let start = Instant::now();
     let (command, log_path) = match &what {
         AuditCmd::Verify { log } => ("audit.verify", log.clone()),
         AuditCmd::Render { log } => ("audit.render", log.clone()),
+        AuditCmd::Tail { .. } => unreachable!("tail is handled above"),
     };
     let text = match std::fs::read_to_string(&log_path) {
         Ok(t) => t,
@@ -434,6 +451,28 @@ fn cmd_audit(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
             }
             Err(e) => emit_err(fmt, "audit.render", ExitCode::GeneralError, &e.to_string()),
         },
+        AuditCmd::Tail { .. } => unreachable!("tail is handled above"),
+    }
+}
+
+/// Follow `log`, printing existing entries as NDJSON and then polling every
+/// 250 ms for new ones. Never returns (user must Ctrl-C).
+fn cmd_audit_tail(log: &PathBuf) -> ! {
+    let mut last_len: usize = 0;
+
+    loop {
+        if let Ok(text) = std::fs::read_to_string(log) {
+            if let Ok(audit) = AuditLog::from_json(&text) {
+                let entries = audit.entries();
+                for entry in entries.iter().skip(last_len) {
+                    if let Ok(line) = serde_json::to_string(entry) {
+                        println!("{line}");
+                    }
+                }
+                last_len = entries.len();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
@@ -530,12 +569,19 @@ fn cmd_introspect(fmt: &OutputFormat) -> ExitCode {
             .with_examples(vec![("Print a sample manifest", "lex-os manifest sample")]),
     );
     tree.add_command(
-        CommandInfo::new("audit", "Verify the hash chain of an audit log.")
-            .idempotent(true)
-            .with_examples(vec![(
-                "Verify a log",
-                "lex-os audit verify --log audit.json",
-            )]),
+        CommandInfo::new(
+            "audit",
+            "Audit-log utilities: verify the hash chain, render as NDJSON, or follow in real time with `tail`.",
+        )
+        .idempotent(true)
+        .with_examples(vec![
+            ("Verify a log", "lex-os audit verify --log audit.json"),
+            ("Render as NDJSON", "lex-os audit render --log audit.json"),
+            (
+                "Follow a log live (Ctrl-C to stop)",
+                "lex-os audit tail --log audit.json",
+            ),
+        ]),
     );
     tree.add_command(
         CommandInfo::new(

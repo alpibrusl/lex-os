@@ -26,7 +26,7 @@ pub use command::{Command, CommandRegistry};
 
 use lex_os_audit::{AuditLog, Event};
 use lex_os_manifest::{Dimension, Manifest, Reversibility};
-use lex_os_perimeter::Perimeter;
+use lex_os_perimeter::{Perimeter, SandboxPolicy};
 use lex_os_resolver::{resolve, Environment, ResolveError};
 
 /// A monotonic clock the supervisor reads for wall-clock budgeting.
@@ -81,6 +81,10 @@ pub enum AgentAction {
     Destroy(String),
     /// Claim the goal is met (the supervisor still decides to stop).
     Done,
+    /// Propose a child manifest. The supervisor validates the narrowing
+    /// invariant and logs `NarrowingBlocked` if the child widens the
+    /// parent grant — the live narrowing-check wall (design doc §7 Attempt 3).
+    ProposeChild(Box<Manifest>),
 }
 
 /// What the agent sees between actions. The reasoning that produced an
@@ -205,7 +209,11 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         env: &Environment,
         agent: &mut dyn Agent,
     ) -> Result<SessionReport, SupervisorError> {
-        let plan = resolve(&self.manifest, env)?;
+        let _plan = resolve(&self.manifest, env)?;
+        // Build the policy from the full manifest so the egress allowlist
+        // is carried into the perimeter (the resolver still validates the
+        // environment, but the authoritative policy comes from here).
+        let policy = SandboxPolicy::from_manifest(&self.manifest);
         let mut audit = AuditLog::new();
         let mut ledger = BudgetLedger::new(self.manifest.budget, self.clock.now_secs());
         let mut checkpoint = Checkpoint::default();
@@ -213,7 +221,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
 
         // Initial provisioning.
         self.perimeter
-            .provision(plan.policy)
+            .provision(policy.clone())
             .map_err(|e| SupervisorError::Provision(e.to_string()))?;
         audit.append(Event::Provisioned {
             manifest_id: self.manifest.content_id().0,
@@ -251,7 +259,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                 }
                 reprovisions += 1;
                 self.perimeter
-                    .provision(plan.policy)
+                    .provision(policy.clone())
                     .map_err(|e| SupervisorError::Provision(e.to_string()))?;
                 audit.append(Event::Provisioned {
                     manifest_id: self.manifest.content_id().0,
@@ -296,6 +304,31 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                         break Outcome::BudgetExhausted(which);
                     }
                 },
+                AgentAction::ProposeChild(child) => {
+                    // Log the proposal as a command request; narrowing
+                    // attempts do NOT consume command budget.
+                    audit.append(Event::CommandRequested {
+                        seq: ledger.commands_used(),
+                        command: "manifest.narrow".into(),
+                        reversibility: "irreversible-bounded".into(),
+                    });
+                    match Manifest::validate_narrowing(&self.manifest, &child) {
+                        Err(e) => {
+                            let reason = e.to_string();
+                            audit.append(Event::NarrowingBlocked {
+                                reason: reason.clone(),
+                            });
+                            last_outcome =
+                                Some(format!("narrowing attempt blocked: {reason}"));
+                        }
+                        Ok(()) => {
+                            audit.append(Event::CommandAllowed {
+                                command: "manifest.narrow".into(),
+                            });
+                            last_outcome = Some("child manifest accepted".into());
+                        }
+                    }
+                }
             }
         };
 
@@ -607,6 +640,44 @@ mod tests {
                 ..
             }
         )));
+        assert!(report.audit.verify().is_ok());
+    }
+
+    #[test]
+    fn propose_child_with_wider_grant_is_blocked_and_does_not_consume_budget() {
+        // Parent has network: none; agent proposes a child with Full network
+        // (a widening attempt). Supervisor must log NarrowingBlocked, the
+        // session continues to GoalMet, and no command budget is spent.
+        let m = manifest(
+            Grant::new(Level::ReadWrite, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m.clone(),
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let child = Box::new(Manifest::new(
+            Goal::new("widen"),
+            Grant::top(), // Full network — widens the parent
+            Budget::research_default(),
+        ));
+        let mut agent = ScriptedAgent::new(vec![
+            AgentAction::ProposeChild(child),
+            AgentAction::Done,
+        ]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+        // Session continues and reaches GoalMet.
+        assert_eq!(report.outcome, Outcome::GoalMet);
+        // Narrowing attempts do not spend command budget.
+        assert_eq!(report.ledger.commands_used(), 0);
+        // The audit log records the block.
+        let blocked = report.audit.entries().iter().any(|e| {
+            matches!(&e.event, Event::NarrowingBlocked { .. })
+        });
+        assert!(blocked, "expected NarrowingBlocked in audit log");
         assert!(report.audit.verify().is_ok());
     }
 }
