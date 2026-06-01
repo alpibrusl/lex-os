@@ -8,6 +8,7 @@ members = [
     "crates/lex-os-supervisor",
     "crates/lex-os-check",
     "crates/lex-os",
+    "crates/results-stub",
 ]
 
 [workspace.package]

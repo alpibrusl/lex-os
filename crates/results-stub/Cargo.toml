@@ -1,0 +1,15 @@
+[package]
+name = "results-stub"
+description = "Tiny HTTP stub for the lex-os demo's results.demo.internal endpoint. Logs requests to stdout so the runbook stays self-contained."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "results-stub"
+path = "src/main.rs"
