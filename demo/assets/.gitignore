@@ -1,0 +1,3 @@
+# Binary assets fetched by setup-assets.sh; do not commit.
+*
+!.gitignore
