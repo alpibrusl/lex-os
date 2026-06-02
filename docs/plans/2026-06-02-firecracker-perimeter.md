@@ -53,7 +53,21 @@ Move the existing skeleton into a directory module with sibling files for `api`,
 - Create: `crates/lex-os-perimeter/src/firecracker/net.rs` (placeholder)
 - Create: `crates/lex-os-perimeter/src/firecracker/vm.rs` (placeholder)
 
-- [ ] **Step 1: Create empty siblings**
+**Ordering note:** `git mv` must happen *before* the sibling stubs are
+created. If `firecracker.rs` and `firecracker/` exist at the same time,
+Rust's module resolver errors out with "file for module `firecracker`
+found at both ...". Also: `git mv` does not auto-create the destination
+directory.
+
+- [ ] **Step 1: Move firecracker.rs into a directory module**
+
+```bash
+mkdir -p crates/lex-os-perimeter/src/firecracker
+git mv crates/lex-os-perimeter/src/firecracker.rs \
+       crates/lex-os-perimeter/src/firecracker/mod.rs
+```
+
+- [ ] **Step 2: Create empty siblings**
 
 ```rust
 // crates/lex-os-perimeter/src/firecracker/api.rs
@@ -68,12 +82,6 @@ Move the existing skeleton into a directory module with sibling files for `api`,
 ```rust
 // crates/lex-os-perimeter/src/firecracker/vm.rs
 //! Firecracker child-process lifecycle (spawn + wait-for-socket + SIGKILL).
-```
-
-- [ ] **Step 2: Move firecracker.rs to firecracker/mod.rs**
-
-```bash
-git mv crates/lex-os-perimeter/src/firecracker.rs crates/lex-os-perimeter/src/firecracker/mod.rs
 ```
 
 - [ ] **Step 3: Declare the new submodules from mod.rs**
@@ -135,8 +143,9 @@ mod tests {
         server.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
         let _ = server.read_to_end(&mut received);
         let text = String::from_utf8_lossy(&received);
+        // Body `{"kernel_image_path":"/k"}` is 26 bytes.
         assert!(text.starts_with("PUT /boot-source HTTP/1.1\r\n"), "got: {text}");
-        assert!(text.contains("Content-Length: 31\r\n"), "got: {text}");
+        assert!(text.contains("Content-Length: 26\r\n"), "got: {text}");
         assert!(text.contains("Content-Type: application/json\r\n"));
         assert!(text.contains("Host: localhost\r\n"));
         assert!(text.ends_with("{\"kernel_image_path\":\"/k\"}"), "got: {text}");
@@ -172,29 +181,20 @@ pub(super) enum ApiError {
     HttpError { status: u16, reason: String, body: String },
 }
 
-/// PUT a JSON body to `path` on the Firecracker socket.
-pub(super) fn put_json<S: Write>(stream: &S, path: &str, body: &str) -> Result<(), ApiError>
-where
-    for<'a> &'a S: Write,
-{
+/// PUT a JSON body to `path` on the Firecracker socket. `UnixStream`
+/// implements `Write` on shared references, so callers pass `&stream`.
+pub(super) fn put_json(stream: impl Write, path: &str, body: &str) -> Result<(), ApiError> {
     request_json(stream, "PUT", path, body)
 }
 
 /// POST a JSON body to `path` on the Firecracker socket.
-pub(super) fn post_json<S: Write>(stream: &S, path: &str, body: &str) -> Result<(), ApiError>
-where
-    for<'a> &'a S: Write,
-{
+pub(super) fn post_json(stream: impl Write, path: &str, body: &str) -> Result<(), ApiError> {
     request_json(stream, "POST", path, body)
 }
 
-fn request_json<S: Write>(stream: &S, method: &str, path: &str, body: &str) -> Result<(), ApiError>
-where
-    for<'a> &'a S: Write,
-{
-    let mut w = stream;
+fn request_json(mut stream: impl Write, method: &str, path: &str, body: &str) -> Result<(), ApiError> {
     write!(
-        w,
+        stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
