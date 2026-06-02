@@ -2,7 +2,7 @@
   "_comment_attack_3": [
     "Attack #3 — narrowing wall (issue #14 'Attempt 3').",
     "",
-    "The parent manifest (examples/net-allowlisted.json) restricts network to",
+    "The parent manifest (demo/manifest.json) restricts network to",
     "Allowlist + egress=['results.demo.internal:443']. The agent — at runtime,",
     "as a command — proposes this manifest as a child it would like to delegate",
     "work to. The supervisor's narrowing check compares parent ≥ child on every",

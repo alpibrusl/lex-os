@@ -2,7 +2,7 @@
 # Attack #2 — kernel egress wall (issue #14 "Attempt 2").
 #
 # Run *inside* the provisioned microVM, as root. The supervisor
-# already provisioned the box from examples/net-allowlisted.json,
+# already provisioned the box from demo/manifest.json,
 # whose grant is network: Allowlist with egress =
 # ["results.demo.internal:443"]. The host installed an iptables
 # rule on the VM's tap device:

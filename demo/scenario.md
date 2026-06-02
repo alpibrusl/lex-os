@@ -10,7 +10,7 @@ its goal. Side-by-side, a Docker-only baseline doing the same task
 
 > **Free inside the box, sealed at the edge.** The grant is the whole
 > safety story. Everything you see on screen is derived from the
-> manifest in `examples/net-allowlisted.json` — no second source of
+> manifest in `demo/manifest.json` — no second source of
 > authority anywhere in the loop.
 
 ## The three walls
@@ -114,31 +114,34 @@ cargo run -p lex-os -- audit verify --log <f>   # audit_verified: true
 
 ## The continuous run
 
-Drive it from one script, `demo/run.sh` (to be written alongside this).
+Drive it from one script: `demo/run.sh`. Today it runs Wall 1 against
+the attack, starts the `results-stub`, runs the mediation loop against
+`demo/manifest.json` (Wall 3 fires inside the loop), and verifies the
+audit hash chain. Wall 2 is a placeholder until issue #14 lands.
 
 ### Wall 1 — type-check (before the agent runs)
 
 ```sh
 # Confirm a benign program passes:
 cargo run -p lex-os -- check \
-  --grant examples/net-allowlisted.json \
+  --grant demo/manifest.json \
   examples/agent-programs/submit_report.lex
 # → ok: true, effects: ["net"], net_hosts: ["results.demo.internal"]
 
 # An adversarial program is rejected before it can run:
 cargo run -p lex-os -- check \
-  --grant examples/net-allowlisted.json \
+  --grant demo/manifest.json \
   demo/attacks/01_typecheck_evil_host.lex
-# → exits non-zero with a structured acli error envelope:
-#   error: net effect to host `evil.com` not covered by grant egress
-#   allowlist [results.demo.internal:443]   (exit code 12)
+# → exits 8 (PreconditionFailed) with a structured acli error envelope:
+#   Error [PRECONDITION_FAILED]: grant violation: net effect to
+#   `evil.com` is not in the grant's egress allowlist
 ```
 
 ### Wall 2 — kernel egress (inside the running microVM)
 
 ```sh
 cargo run -p lex-os --features firecracker -- \
-  run --manifest examples/net-allowlisted.json --audit-out audit.json
+  run --manifest demo/manifest.json --audit-out audit.json
 
 # Inside the box (the agent's "install + build + report" workflow):
 #   apt-get install nginx           OK — root in the microVM

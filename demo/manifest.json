@@ -1,0 +1,24 @@
+{
+  "_comment_demo_manifest": [
+    "Canonical manifest for the lex-os one-continuous-run demo (issue #10).",
+    "",
+    "Identical to examples/net-allowlisted.json on grant + egress + isolation",
+    "floor (the safety surface). The only difference is that this manifest",
+    "funds the budget enough for the agent's plan to reach all the way to the",
+    "widen-attempt (Wall 3), instead of hitting BudgetExhausted on the first",
+    "net.fetch.",
+    "",
+    "The funded budget is itself part of the demo's honesty: every cent the",
+    "agent spends is logged via budget_charged events; the cap of 100 cents",
+    "means the worst-case spend is bounded even though the agent is acting",
+    "autonomously."
+  ],
+  "goal": {
+    "description": "set up the data-processing service and submit the report to the results endpoint",
+    "done_signal": "REPORT_SUBMITTED"
+  },
+  "grant": { "filesystem": "Full", "network": "Allowlist", "exec": "Full" },
+  "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 100, "max_api_calls": 50 },
+  "isolation_floor": "MicroVm",
+  "egress": ["results.demo.internal:443"]
+}

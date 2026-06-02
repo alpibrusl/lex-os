@@ -1,9 +1,9 @@
 //! results-stub: the single allowed-egress target for the lex-os demo
 //! (issue #10).
 //!
-//! The demo's manifest (examples/net-allowlisted.json) declares an
-//! egress allowlist of `results.demo.internal:443` — exactly one
-//! host. To keep the demo self-contained and free of network
+//! The demo's manifest (demo/manifest.json) declares an egress
+//! allowlist of `results.demo.internal:443` — exactly one host.
+//! To keep the demo self-contained and free of network
 //! dependencies on a real service, this tiny binary impersonates
 //! that endpoint: it accepts HTTP requests on a configurable port,
 //! logs each one to stdout, and replies with a fixed 200.
