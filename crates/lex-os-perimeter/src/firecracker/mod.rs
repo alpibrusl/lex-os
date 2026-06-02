@@ -7,6 +7,10 @@
 //! and policy checks are all exercisable without a KVM host.  Swap the
 //! `provision` body for the real HTTP calls to go live.
 
+mod api;
+mod net;
+mod vm;
+
 use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
 use lex_os_manifest::{Dimension, IsolationFloor, Level};
 
@@ -86,7 +90,7 @@ impl Perimeter for FirecrackerPerimeter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lex_os_manifest::{Budget, Goal, Grant, Level};
+    use lex_os_manifest::{Grant, Level};
 
     /// Full provision → check → destroy cycle on the simulated backend.
     /// This test is ignored by default because the real backend requires KVM.
