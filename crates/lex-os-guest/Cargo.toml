@@ -21,4 +21,6 @@ vsock = ["lex-os-proto/vsock"]
 lex-os-proto = { path = "../lex-os-proto" }
 serde_json.workspace = true
 anyhow.workspace = true
-ureq = { version = "2", features = ["json"] }
+# The guest only talks plain HTTP to Ollama, so drop ureq's TLS backend
+# (rustls+ring) — keeps the static musl build pure-Rust, no musl C toolchain.
+ureq = { version = "2", default-features = false, features = ["json"] }
