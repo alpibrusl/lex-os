@@ -160,12 +160,27 @@ flushing iptables *inside* the guest changes nothing. The raw-IP probe
 (`8.8.8.8`) is the cleanest demonstration: no DNS is involved, so the only
 thing that can stop it is routing/firewalling at the boundary.
 
-> Egress wiring on the host: the allowlisted target (`results.demo.internal`)
-> must resolve **on the host** (for the iptables `-d` rule) and **in the
-> guest** (for the curl), pointing at the `results-stub` reachable over the
-> tap. This host plumbing (`/etc/hosts` + stub bind address) is finalized in
-> the issue #14 KVM smoke test and is the most likely thing to need tuning on
-> first boot; the denied probes above do not depend on it.
+> **Open: the ALLOWED leg of the egress wall is not yet validated.** The
+> denied probes above are the load-bearing demonstration and work via the
+> FORWARD chain (`-i tap-lex0 → DROP`). The *allowed* leg is harder and needs
+> an on-host topology decision in the issue #14 KVM smoke test:
+>
+> - `install_egress_allowlist` writes an `iptables -d <host>` rule on the
+>   **filter/FORWARD** chain. FORWARD only sees traffic the host *routes*
+>   between interfaces — so it requires `sysctl net.ipv4.ip_forward=1` (the
+>   backend does not set this yet) and, for genuinely external targets, a
+>   POSTROUTING MASQUERADE.
+> - If the allowed target is the host-local `results-stub` (reached at the
+>   tap gateway `169.254.42.1`), that traffic is delivered **locally via
+>   INPUT, not FORWARD**, so the FORWARD ACCEPT never matches it. Either run
+>   the stub somewhere reached over FORWARD, or add an INPUT-chain ACCEPT for
+>   the allowed host:port.
+> - `iptables -d <hostname>` resolves the name to an IP **at insertion time**;
+>   that IP must equal what the guest actually dials. Pin both via `/etc/hosts`
+>   (host + guest), or switch the allowlist/rule to IPs.
+>
+> None of this affects the security property (it fails closed — unmatched
+> traffic is dropped), only the demo's "allowed traffic still flows" contrast.
 
 ### Wall 3 — narrowing (live, logged)
 
