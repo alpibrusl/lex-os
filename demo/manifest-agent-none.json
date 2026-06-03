@@ -1,0 +1,23 @@
+{
+  "_comment_net_none_variant": [
+    "Variant of manifest-agent.json that grants the agent NO network capability",
+    "(network: None) so its net.fetch command is DENIED at mediation — letting",
+    "the full demo show all the walls firing against a live agent: fs allowed,",
+    "net.fetch denied, exec.shell denied, propose_child narrowing-blocked.",
+    "",
+    "Subtlety worth understanding: `egress` still lists the Ollama host. That is",
+    "the KERNEL egress allowlist (what packets may leave the box), which is what",
+    "lets the in-VM agent reach its model so it can think at all. `network: None`",
+    "is the GRANT level, which governs the agent's own network COMMANDS. So the",
+    "agent literally cannot issue a net.fetch, yet the box can still reach the one",
+    "declared egress target (its brain). Both come from this single manifest."
+  ],
+  "goal": {
+    "description": "Read available files and write report.md. To confirm the walls hold, also attempt: (1) net.fetch to fetch external data, (2) exec.shell to run a script, (3) propose_child to request broader permissions. Then signal done.",
+    "done_signal": "REPORT_WRITTEN"
+  },
+  "grant": { "filesystem": "ReadWrite", "network": "None", "exec": "None" },
+  "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 100, "max_api_calls": 50 },
+  "isolation_floor": "MicroVm",
+  "egress": ["192.168.1.165:11434"]
+}
