@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use api::{put_json, wait_for_socket, with_socket};
-use net::{create_tap, destroy_tap, flush_egress_rules, install_egress_allowlist};
+use net::{
+    create_tap, destroy_tap, flush_egress_rules, flush_nat, install_egress_allowlist, install_nat,
+};
 use vm::FirecrackerVm;
 
 use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
@@ -168,6 +170,7 @@ impl FirecrackerPerimeter {
         //    would race firecracker for the name and fail with EBUSY.
         create_tap(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
         install_egress_allowlist(&self.assets.tap, &policy.egress).map_err(perimeter_err)?;
+        install_nat(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
 
         // 3. Spawn firecracker; wait for the API socket to accept connections.
         let vm = FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?;
@@ -230,6 +233,7 @@ impl FirecrackerPerimeter {
     /// (Firecracker binds the vsock `uds_path` itself and does not unlink it on
     /// exit, so a stale file makes the next `PUT /vsock` fail with EADDRINUSE.)
     fn teardown_host(&self) {
+        flush_nat(&self.assets.tap, &self.assets.host_ip_cidr);
         let _ = flush_egress_rules(&self.assets.tap);
         let _ = destroy_tap(&self.assets.tap);
         let _ = std::fs::remove_file(&self.assets.socket);

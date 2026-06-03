@@ -36,4 +36,7 @@ echo "+ build + inject the in-VM agent binary into the rootfs"
 bash demo/setup-assets.sh >/dev/null
 
 echo "+ booting in-VM agent (ollama=$OLLAMA model=$MODEL)"
-"$LEXOS" run --agent guest --ollama-url "http://$OLLAMA" --model "$MODEL"
+# manifest-agent.json allowlists the Ollama host as the box's ONE egress target.
+# If you override OLLAMA, update demo/manifest-agent.json's egress to match.
+"$LEXOS" run --agent guest --manifest demo/manifest-agent.json \
+  --ollama-url "http://$OLLAMA" --model "$MODEL" --audit-out demo/agent-audit.json

@@ -94,6 +94,84 @@ pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(
     Ok(())
 }
 
+/// Make allowlisted egress actually round-trip: accept return traffic to the
+/// guest, and masquerade the guest's private source out to the LAN/WAN. The
+/// FORWARD ACCEPT only lets the SYN out (`-i tap`); replies arrive on `-o tap`
+/// and the guest's `169.254.x` source needs NAT to come back. This does NOT
+/// widen the wall — non-allowlisted destinations still hit the `-i tap` DROP.
+pub(super) fn install_nat(tap: &str, guest_cidr: &str) -> Result<(), NetError> {
+    run(
+        "iptables",
+        &[
+            "-A",
+            "FORWARD",
+            "-o",
+            tap,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ],
+    )?;
+    // iptables masks `-s host/prefix` to the network, so passing the host CIDR
+    // (e.g. 169.254.42.1/30) masquerades the whole guest subnet.
+    run(
+        "iptables",
+        &[
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            guest_cidr,
+            "-j",
+            "MASQUERADE",
+        ],
+    )?;
+    Ok(())
+}
+
+/// Remove the NAT/return rules added by [`install_nat`]. Idempotent: loops
+/// until iptables reports the rule is gone, and never flushes whole chains.
+pub(super) fn flush_nat(tap: &str, guest_cidr: &str) {
+    let del_return = [
+        "-D",
+        "FORWARD",
+        "-o",
+        tap,
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "ESTABLISHED,RELATED",
+        "-j",
+        "ACCEPT",
+    ];
+    while Command::new("iptables")
+        .args(del_return)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {}
+    let del_masq = [
+        "-t",
+        "nat",
+        "-D",
+        "POSTROUTING",
+        "-s",
+        guest_cidr,
+        "-j",
+        "MASQUERADE",
+    ];
+    while Command::new("iptables")
+        .args(del_masq)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {}
+}
+
 /// Resolve `host:port` to a single IP, or `None` if it does not resolve.
 fn resolve_host(host: &str, port: u16) -> Option<std::net::IpAddr> {
     (host, port)
