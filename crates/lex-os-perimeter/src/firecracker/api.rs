@@ -1,9 +1,5 @@
 //! HTTP/1.1 client over `UnixStream` for the Firecracker management API.
 
-// Several helpers below are wired into provision()/destroy() in a later
-// task (#14); allow dead_code until then.
-#![allow(dead_code)]
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
