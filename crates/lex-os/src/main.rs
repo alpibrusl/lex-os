@@ -23,6 +23,9 @@ use serde_json::json;
 
 use lex_os_audit::AuditLog;
 use lex_os_manifest::Manifest;
+#[cfg(feature = "firecracker")]
+use lex_os_perimeter::FirecrackerPerimeter;
+#[cfg(not(feature = "firecracker"))]
 use lex_os_perimeter::SimulatedPerimeter;
 use lex_os_resolver::{resolve, Environment};
 use lex_os_supervisor::{Limits, Supervisor, SystemClock};
@@ -223,6 +226,19 @@ fn cmd_run(
     // since the registry is the developer's command vocabulary, not part
     // of the manifest.
     let registry = demo::demo_registry();
+    // The perimeter backend is a compile-time choice: `--features firecracker`
+    // boots a real microVM (KVM host required), otherwise the in-process
+    // simulated perimeter runs the loop anywhere. Both satisfy `Perimeter`,
+    // so the rest of `cmd_run` is identical.
+    #[cfg(feature = "firecracker")]
+    let supervisor = Supervisor::new(
+        manifest.clone(),
+        registry,
+        FirecrackerPerimeter::new(),
+        SystemClock,
+        Limits::default(),
+    );
+    #[cfg(not(feature = "firecracker"))]
     let supervisor = Supervisor::new(
         manifest.clone(),
         registry,

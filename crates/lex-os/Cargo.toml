@@ -15,6 +15,11 @@ default-run = "lex-os"
 name = "lex-os"
 path = "src/main.rs"
 
+[features]
+# Select the real Firecracker microVM perimeter for `run` instead of the
+# in-process simulated one. Requires a KVM host (see demo/host-check.sh).
+firecracker = ["lex-os-perimeter/firecracker"]
+
 [dependencies]
 lex-os-manifest.workspace = true
 lex-os-perimeter.workspace = true

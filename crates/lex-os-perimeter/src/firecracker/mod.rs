@@ -26,6 +26,11 @@ pub struct FirecrackerAssets {
     pub tap: String,
     /// Host IP on the tap, CIDR form. The guest gets the .2 address.
     pub host_ip_cidr: String,
+    /// Kernel command line. The default boots the demo's guest-side attack
+    /// script (`init=/sbin/init.demo`, injected into the rootfs by
+    /// `demo/setup-assets.sh`); a real agent run overrides this via
+    /// [`FirecrackerPerimeter::with_assets`].
+    pub boot_args: String,
 }
 
 impl Default for FirecrackerAssets {
@@ -36,6 +41,7 @@ impl Default for FirecrackerAssets {
             socket: PathBuf::from("/tmp/firecracker-lex-os.sock"),
             tap: "tap-lex0".into(),
             host_ip_cidr: "169.254.42.1/30".into(),
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.demo".into(),
         }
     }
 }
@@ -100,8 +106,9 @@ impl Perimeter for FirecrackerPerimeter {
 
         // 3. Configure the boot source.
         let boot = format!(
-            r#"{{"kernel_image_path":"{}","boot_args":"console=ttyS0 reboot=k panic=1 pci=off"}}"#,
-            self.assets.kernel.display()
+            r#"{{"kernel_image_path":"{}","boot_args":"{}"}}"#,
+            self.assets.kernel.display(),
+            self.assets.boot_args
         );
         with_socket(&self.assets.socket, |s| put_json(s, "/boot-source", &boot))
             .map_err(perimeter_err)?;
