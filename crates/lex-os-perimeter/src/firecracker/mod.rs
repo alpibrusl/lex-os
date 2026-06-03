@@ -225,12 +225,17 @@ impl FirecrackerPerimeter {
         Ok(vm)
     }
 
-    /// Remove the host-side footprint: egress rules, tap device, API socket.
-    /// Idempotent — every step ignores "already gone".
+    /// Remove the host-side footprint: egress rules, tap device, API socket,
+    /// and the vsock UDS. Idempotent — every step ignores "already gone".
+    /// (Firecracker binds the vsock `uds_path` itself and does not unlink it on
+    /// exit, so a stale file makes the next `PUT /vsock` fail with EADDRINUSE.)
     fn teardown_host(&self) {
         let _ = flush_egress_rules(&self.assets.tap);
         let _ = destroy_tap(&self.assets.tap);
         let _ = std::fs::remove_file(&self.assets.socket);
+        if !self.assets.socket_vsock.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.assets.socket_vsock);
+        }
     }
 }
 
