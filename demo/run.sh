@@ -12,12 +12,13 @@
 #               · agent submits the report → allowed
 #   Scene 4: audit verification + key event grep
 #
+# Requires a KVM host: this run boots a real Firecracker microVM for Wall 2
+# (issue #14). Run demo/host-check.sh first; run as root.
+#
 # What this script does NOT do today (issues that gate the full demo):
-#   · Wall 2 (Attempt 2 — kernel egress) needs the Firecracker backend
-#     wired to a real KVM host (issue #14). The script prints the curls
-#     that WOULD run inside the VM but does not actually exec them.
 #   · The agent is the hard-coded DemoAgent in crates/lex-os/src/demo.rs,
-#     not an LLM (issue #8 replaces it).
+#     not an LLM (issue #8 replaces it). Wall 2's egress attempts come from
+#     the guest's init-attack.sh, not yet from the agent itself.
 #   · The naive Docker baseline pane (issue #9) is a separate command.
 
 set -euo pipefail
@@ -45,8 +46,15 @@ say() {
   printf "\n=== %s ===\n" "$*"
 }
 
+say "Pre-flight: host check"
+if ! bash demo/host-check.sh; then
+  echo "demo: host-check failed; this run boots a real microVM and needs KVM" >&2
+  echo "      (run demo/setup-assets.sh first, and run as root on a KVM host)" >&2
+  exit 1
+fi
+
 say "Pre-flight: build"
-cargo build --quiet -p lex-os -p results-stub
+cargo build --quiet --features firecracker -p lex-os -p results-stub
 
 say "Scene 1 — Wall 1: type-check"
 echo "+ benign program against the demo grant — must pass"
@@ -76,12 +84,13 @@ done
 echo "+ results-stub listening on 127.0.0.1:${STUB_PORT} (pid=${STUB_PID}, log=demo/stub.log)"
 
 say "Scene 3 — Walls 2 & 3 inside the run"
-echo "+ Wall 2 (kernel egress) is gated on issue #14 (Firecracker on real KVM)."
-echo "  Once #14 lands, the agent would exec the following inside the microVM:"
-sed -n 's/^/    /; p' demo/attacks/02_curl_evil.sh | grep -E '^    (echo|curl)' | head -12
+echo "+ Wall 2 (kernel egress) now fires for real: the supervisor boots a"
+echo "  Firecracker microVM and the guest runs demo/init-attack.sh (installed"
+echo "  as /sbin/init.demo). Its console output — allowed target OK, evil.com"
+echo "  and 8.8.8.8 blocked at the host tap's iptables — is captured below."
+echo "+ Wall 3 (grant narrowing) fires in the same mediation loop."
 echo
-echo "+ Running the mediation loop now (Wall 3 — narrowing — fires here):"
-cargo run --quiet -p lex-os -- run --manifest "$MANIFEST" --audit-out "$AUDIT_LOG"
+cargo run --quiet --features firecracker -p lex-os -- run --manifest "$MANIFEST" --audit-out "$AUDIT_LOG"
 
 say "Scene 4 — audit verification"
 echo "+ hash chain"
@@ -100,5 +109,5 @@ fi
 say "Done"
 echo "+ audit log: $AUDIT_LOG"
 echo "+ stub log:  demo/stub.log"
-echo "+ what's gated: Wall 2 needs issue #14 (KVM); a real LLM agent needs #8;"
-echo "  the naive Docker baseline pane needs #9."
+echo "+ what's gated: a real LLM agent needs #8; the naive Docker baseline"
+echo "  pane needs #9. Wall 2 (kernel egress) is live on this KVM host."

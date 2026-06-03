@@ -45,6 +45,20 @@ fi
 [ -f vmlinux ]     || { echo "+ fetching guest kernel"; curl -fsSL -o vmlinux "$KERNEL_URL"; }
 [ -f rootfs.ext4 ] || { echo "+ fetching guest rootfs"; curl -fsSL -o rootfs.ext4 "$ROOTFS_URL"; }
 
+# 4. Inject the guest-side attack init (attack #2) into the rootfs as
+#    /sbin/init.demo. The perimeter boots it via init=/sbin/init.demo (see
+#    FirecrackerAssets::default in firecracker/mod.rs). Needs root to loop-mount.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "+ injecting init-attack.sh into the rootfs (/sbin/init.demo)"
+  mnt="$(mktemp -d)"
+  mount -o loop rootfs.ext4 "$mnt"
+  install -m 0755 ../init-attack.sh "$mnt/sbin/init.demo"
+  umount "$mnt"
+  rmdir "$mnt"
+else
+  echo "! skipping rootfs init injection (needs root); re-run with sudo to enable attack #2"
+fi
+
 echo "+ assets in $(pwd)"
 ls -lh firecracker jailer vmlinux rootfs.ext4
 ./firecracker --version | head -1

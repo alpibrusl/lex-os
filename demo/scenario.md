@@ -114,10 +114,12 @@ cargo run -p lex-os -- audit verify --log <f>   # audit_verified: true
 
 ## The continuous run
 
-Drive it from one script: `demo/run.sh`. Today it runs Wall 1 against
-the attack, starts the `results-stub`, runs the mediation loop against
-`demo/manifest.json` (Wall 3 fires inside the loop), and verifies the
-audit hash chain. Wall 2 is a placeholder until issue #14 lands.
+Drive it from one script: `demo/run.sh`. It pre-flights `demo/host-check.sh`
+(the run boots a real microVM, so it needs KVM + root), runs Wall 1 against
+the attack, starts the `results-stub`, then runs the mediation loop with
+`--features firecracker` against `demo/manifest.json`. Wall 2 fires inside
+the booted microVM (the guest runs `demo/init-attack.sh` as `/sbin/init.demo`)
+and Wall 3 fires inside the loop; the audit hash chain is verified at the end.
 
 ### Wall 1 — type-check (before the agent runs)
 
@@ -143,18 +145,27 @@ cargo run -p lex-os -- check \
 cargo run -p lex-os --features firecracker -- \
   run --manifest demo/manifest.json --audit-out audit.json
 
-# Inside the box (the agent's "install + build + report" workflow):
-#   apt-get install nginx           OK — root in the microVM
-#   curl https://results.demo.internal:443/healthz   OK — allowlisted
-#   curl https://evil.com           "No route to host" — host-side iptables
-#   curl https://8.8.8.8            "No route to host" — host-side iptables
+# The guest boots into /sbin/init.demo (demo/init-attack.sh) and emits, to
+# the console Firecracker captures:
+#   --- allowed (the legitimate target) ---   results.demo.internal → 200 OK
+#   --- denied: named host outside the allowlist ---   evil.com → blocked
+#   --- denied: raw IP, no DNS involved ---            8.8.8.8  → blocked
 ```
 
-The `curl evil.com` failure happens at the kernel: the packet leaves
-the tap device, the host iptables on `tap0` has no `ACCEPT` rule for
-`evil.com`, the packet is dropped. The agent is root, sees the kernel
-error, has no recourse — there is no host process inside the box to
-disable.
+The denied attempts fail at the kernel: the packet leaves the guest on
+`eth0`, the host iptables on the tap device (`tap-lex0`) has no `ACCEPT`
+rule for that destination, and the catch-all `DROP` takes it. The agent is
+root inside the VM but the rule lives on the host tap it does not own —
+flushing iptables *inside* the guest changes nothing. The raw-IP probe
+(`8.8.8.8`) is the cleanest demonstration: no DNS is involved, so the only
+thing that can stop it is routing/firewalling at the boundary.
+
+> Egress wiring on the host: the allowlisted target (`results.demo.internal`)
+> must resolve **on the host** (for the iptables `-d` rule) and **in the
+> guest** (for the curl), pointing at the `results-stub` reachable over the
+> tap. This host plumbing (`/etc/hosts` + stub bind address) is finalized in
+> the issue #14 KVM smoke test and is the most likely thing to need tuning on
+> first boot; the denied probes above do not depend on it.
 
 ### Wall 3 — narrowing (live, logged)
 
@@ -252,7 +263,8 @@ A single, unedited screen recording in which:
 This runbook will not produce a complete recording until these
 slices land:
 
-- [issue #14] FirecrackerPerimeter wired to real KVM (the entire Wall 2)
+- [issue #14] FirecrackerPerimeter wired to real KVM (the entire Wall 2) —
+  *implemented; pending the on-host KVM smoke test to validate guest egress wiring*
 - [issue #7] real reprovision-on-death against the microVM backend
 - [issue #8] real LLM agent + the three real attack injections
 - [issue #9] the naive Docker baseline as a sibling command
