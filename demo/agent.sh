@@ -17,10 +17,12 @@ cd "$REPO_ROOT"
 
 OLLAMA="${OLLAMA:-192.168.1.165:11434}"
 MODEL="${MODEL:-devstral-small-2:latest}"
-# manifest-agent.json: net=allowlist (agent may call the net). manifest-agent-none.json:
-# net=none → the agent's net.fetch is DENIED, showing all walls fire (it can still
-# reach its model, which is the kernel egress allowlist, not the grant level).
-MANIFEST="${MANIFEST:-demo/manifest-agent.json}"
+# Manifest: first positional arg (survives sudo, unlike env), else $MANIFEST, else default.
+# demo/manifest-agent.json: net=allowlist (agent may call the net).
+# demo/manifest-agent-none.json: net=none → net.fetch DENIED, all walls fire (the agent
+# still reaches its model, which is the kernel egress allowlist, not the grant level).
+#   sudo bash demo/agent.sh demo/manifest-agent-none.json
+MANIFEST="${1:-${MANIFEST:-demo/manifest-agent.json}}"
 
 # Build as the invoking user (root has no rustup toolchain); run as root.
 CARGO=(cargo)
