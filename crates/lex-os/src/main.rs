@@ -112,6 +112,19 @@ enum Cmd {
     },
     /// Emit the acli command tree for agent discovery.
     Introspect,
+    /// Standalone Wall-2 proof: boot a real Firecracker microVM with the
+    /// host-side egress wall, dwell while the guest boots and runs
+    /// `/sbin/init.demo` (the egress probes), then tear it down. Streams the
+    /// guest console. Requires `--features firecracker`, a KVM host, and root.
+    #[cfg(feature = "firecracker")]
+    BoxSmoke {
+        /// Manifest whose grant + egress allowlist define the box's wall.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Seconds to let the guest boot and run its init before teardown.
+        #[arg(long, default_value_t = 12)]
+        dwell: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -174,6 +187,8 @@ fn main() {
         Cmd::Audit { what } => cmd_audit(&fmt, what),
         Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
         Cmd::Introspect => cmd_introspect(&fmt),
+        #[cfg(feature = "firecracker")]
+        Cmd::BoxSmoke { manifest, dwell } => cmd_box_smoke(&fmt, manifest, dwell),
     };
     std::process::exit(code.code());
 }
@@ -277,6 +292,62 @@ fn cmd_run(
     });
     emit(
         &success_envelope("run", data, VERSION, Some(start), None),
+        fmt,
+    );
+    ExitCode::Success
+}
+
+/// Standalone Wall-2 proof. Provision a real microVM (which installs the
+/// host-side egress wall on the tap), dwell so the guest boots and runs
+/// `/sbin/init.demo` — its console (incl. the `8.8.8.8 -> blocked` probe)
+/// streams live — then tear the box down. Bypasses the supervisor loop on
+/// purpose: this exercises the perimeter alone, long enough to observe it.
+#[cfg(feature = "firecracker")]
+fn cmd_box_smoke(fmt: &OutputFormat, manifest: Option<PathBuf>, dwell: u64) -> ExitCode {
+    use lex_os_perimeter::{Perimeter, SandboxPolicy};
+
+    let manifest = match load_manifest(&manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            return emit_err(
+                fmt,
+                "box-smoke",
+                ExitCode::InvalidArgs,
+                &format!("bad manifest: {e}"),
+            )
+        }
+    };
+    let policy = SandboxPolicy::from_manifest(&manifest);
+    eprintln!(
+        "box-smoke: provisioning microVM; egress allowlist = {:?}",
+        policy.egress
+    );
+
+    let mut perim = FirecrackerPerimeter::new();
+    if let Err(e) = perim.provision(policy) {
+        return emit_err(
+            fmt,
+            "box-smoke",
+            ExitCode::PreconditionFailed,
+            &e.to_string(),
+        );
+    }
+    eprintln!(
+        "box-smoke: provisioned — dwelling {dwell}s while the guest boots and runs \
+         /sbin/init.demo (watch the console below)"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(dwell));
+
+    perim.destroy("box-smoke complete");
+    eprintln!("box-smoke: box destroyed, host tap + egress rules removed");
+    emit(
+        &success_envelope(
+            "box-smoke",
+            json!({ "dwell_secs": dwell }),
+            VERSION,
+            None,
+            None,
+        ),
         fmt,
     );
     ExitCode::Success
