@@ -11,6 +11,7 @@
 //! `lex-os-supervisor` runs the mediated command loop under hard
 //! budgets with reprovision-on-death.
 
+mod agent;
 mod demo;
 
 use std::path::PathBuf;
@@ -62,6 +63,20 @@ impl Format {
     }
 }
 
+/// Which LLM backend drives the agent.
+#[derive(Copy, Clone, ValueEnum, Default)]
+enum AgentBackend {
+    /// Scripted deterministic demo agent (no model required).
+    #[default]
+    Demo,
+    /// Local Ollama model (default: mistral). No egress needed.
+    Ollama,
+    /// Anthropic Claude (ANTHROPIC_API_KEY env var required).
+    Anthropic,
+    /// OpenAI-compatible endpoint (OPENAI_API_KEY env var required).
+    OpenAi,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Dispatch an agent against a manifest and run the mediation loop
@@ -79,6 +94,15 @@ enum Cmd {
         /// Pretend the host has no outbound network.
         #[arg(long)]
         offline: bool,
+        /// LLM backend to use as the agent brain (default: demo).
+        #[arg(long, default_value = "demo")]
+        agent: AgentBackend,
+        /// Model name for the selected backend (e.g. "mistral", "qwen2.5-coder").
+        #[arg(long)]
+        model: Option<String>,
+        /// Ollama base URL (default: http://localhost:11434).
+        #[arg(long)]
+        ollama_url: Option<String>,
     },
     /// Negotiate a manifest against the (simulated) host and show what
     /// it resolves to — without running anything.
@@ -177,7 +201,10 @@ fn main() {
             audit_out,
             namespaces_only,
             offline,
-        } => cmd_run(&fmt, manifest, audit_out, namespaces_only, offline),
+            agent,
+            model,
+            ollama_url,
+        } => cmd_run(&fmt, manifest, audit_out, namespaces_only, offline, agent, model, ollama_url),
         Cmd::Resolve {
             manifest,
             namespaces_only,
@@ -218,56 +245,107 @@ fn environment(namespaces_only: bool, offline: bool) -> Environment {
 
 fn cmd_run(
     fmt: &OutputFormat,
-    manifest: Option<PathBuf>,
+    manifest_path: Option<PathBuf>,
     audit_out: Option<PathBuf>,
     namespaces_only: bool,
     offline: bool,
+    agent_backend: AgentBackend,
+    model: Option<String>,
+    ollama_url: Option<String>,
 ) -> ExitCode {
     let start = Instant::now();
-    let manifest = match load_manifest(&manifest) {
-        Ok(m) => m,
-        Err(e) => {
-            return emit_err(
-                fmt,
-                "run",
-                ExitCode::InvalidArgs,
-                &format!("bad manifest: {e}"),
-            )
-        }
+
+    // For LLM agents use a goal that motivates the three attacks naturally;
+    // the scripted demo keeps its own manifest.
+    let manifest = match (&manifest_path, &agent_backend) {
+        (None, AgentBackend::Demo) => demo::demo_manifest(),
+        (None, _) => agent::agent_demo_manifest(),
+        (Some(_), _) => match load_manifest(&manifest_path) {
+            Ok(m) => m,
+            Err(e) => {
+                return emit_err(
+                    fmt,
+                    "run",
+                    ExitCode::InvalidArgs,
+                    &format!("bad manifest: {e}"),
+                )
+            }
+        },
     };
+
     let env = environment(namespaces_only, offline);
-
-    // Demo uses its own registry; a file-loaded manifest reuses it too,
-    // since the registry is the developer's command vocabulary, not part
-    // of the manifest.
     let registry = demo::demo_registry();
-    // The perimeter backend is a compile-time choice: `--features firecracker`
-    // boots a real microVM (KVM host required), otherwise the in-process
-    // simulated perimeter runs the loop anywhere. Both satisfy `Perimeter`,
-    // so the rest of `cmd_run` is identical.
-    #[cfg(feature = "firecracker")]
-    let supervisor = Supervisor::new(
-        manifest.clone(),
-        registry,
-        FirecrackerPerimeter::new(),
-        SystemClock,
-        Limits::default(),
-    );
-    #[cfg(not(feature = "firecracker"))]
-    let supervisor = Supervisor::new(
-        manifest.clone(),
-        registry,
-        SimulatedPerimeter::new(),
-        SystemClock,
-        Limits::default(),
-    );
-    let mut agent = demo::DemoAgent::new();
 
-    let report = match supervisor.run(&env, &mut agent) {
-        Ok(r) => r,
-        Err(e) => {
-            // Resolution / provisioning failure: refuse, don't downgrade.
-            return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string());
+    #[cfg(feature = "firecracker")]
+    let make_supervisor = |m: Manifest| {
+        Supervisor::new(m, registry, FirecrackerPerimeter::new(), SystemClock, Limits::default())
+    };
+    #[cfg(not(feature = "firecracker"))]
+    let make_supervisor = |m: Manifest| {
+        Supervisor::new(m, registry, SimulatedPerimeter::new(), SystemClock, Limits::default())
+    };
+
+    // Commands exposed to the LLM agent (names only, for the system prompt).
+    let command_names = vec![
+        "fs.list", "fs.read", "fs.write", "report.write",
+        "net.fetch", "exec.shell", "fs.delete_all",
+    ]
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect::<Vec<_>>();
+
+    // Dispatch to the chosen agent backend.
+    let report = match agent_backend {
+        AgentBackend::Demo => {
+            let supervisor = make_supervisor(manifest.clone());
+            let mut ag = demo::DemoAgent::new();
+            match supervisor.run(&env, &mut ag) {
+                Ok(r) => r,
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            }
+        }
+        AgentBackend::Ollama => {
+            let model_name = model.as_deref().unwrap_or("mistral").to_string();
+            let mut provider = agent::OllamaProvider::new(model_name);
+            if let Some(url) = ollama_url {
+                provider = provider.with_url(url);
+            }
+            let supervisor = make_supervisor(manifest.clone());
+            let mut ag = agent::LlmAgent::new(provider, command_names, manifest.clone());
+            match supervisor.run(&env, &mut ag) {
+                Ok(r) => r,
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            }
+        }
+        AgentBackend::Anthropic => {
+            let provider = match agent::AnthropicProvider::from_env() {
+                Ok(p) => match model {
+                    Some(m) => p.with_model(m),
+                    None => p,
+                },
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            };
+            let supervisor = make_supervisor(manifest.clone());
+            let mut ag = agent::LlmAgent::new(provider, command_names, manifest.clone());
+            match supervisor.run(&env, &mut ag) {
+                Ok(r) => r,
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            }
+        }
+        AgentBackend::OpenAi => {
+            let provider = match agent::OpenAiProvider::from_env() {
+                Ok(p) => match model {
+                    Some(m) => p.with_model(m),
+                    None => p,
+                },
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            };
+            let supervisor = make_supervisor(manifest.clone());
+            let mut ag = agent::LlmAgent::new(provider, command_names, manifest.clone());
+            match supervisor.run(&env, &mut ag) {
+                Ok(r) => r,
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            }
         }
     };
 
