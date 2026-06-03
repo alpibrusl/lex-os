@@ -20,9 +20,11 @@
 
 mod budget;
 mod command;
+mod vsock_agent;
 
 pub use budget::{BudgetLedger, Charge};
 pub use command::{Command, CommandRegistry};
+pub use vsock_agent::VsockAgent;
 
 use lex_os_audit::{AuditLog, Event};
 use lex_os_manifest::{Dimension, Manifest, Reversibility};

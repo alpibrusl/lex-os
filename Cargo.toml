@@ -8,6 +8,8 @@ members = [
     "crates/lex-os-supervisor",
     "crates/lex-os-check",
     "crates/lex-os",
+    "crates/lex-os-proto",
+    "crates/lex-os-guest",
     "crates/results-stub",
 ]
 
@@ -29,6 +31,7 @@ lex-os-perimeter = { path = "crates/lex-os-perimeter", version = "0.1.0" }
 lex-os-resolver = { path = "crates/lex-os-resolver", version = "0.1.0" }
 lex-os-supervisor = { path = "crates/lex-os-supervisor", version = "0.1.0" }
 lex-os-check = { path = "crates/lex-os-check", version = "0.1.0" }
+lex-os-proto = { path = "crates/lex-os-proto", version = "0.1.0" }
 
 # Upstream dependency graph (design doc §11): lex-os -> lex-lang -> acli.
 # The trust lattice that drives both the static type check and the

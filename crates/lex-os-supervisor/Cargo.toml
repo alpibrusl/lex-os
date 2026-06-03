@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+lex-os-proto = { path = "../lex-os-proto" }
 lex-os-manifest.workspace = true
 lex-os-perimeter.workspace = true
 lex-os-resolver.workspace = true

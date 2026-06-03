@@ -1,0 +1,18 @@
+[package]
+name = "lex-os-proto"
+description = "Wire protocol between the lex-os supervisor and the in-guest agent binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+# Real AF_VSOCK transport — Linux only. Enable when building for a KVM host.
+vsock = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

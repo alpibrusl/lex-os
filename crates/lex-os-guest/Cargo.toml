@@ -1,0 +1,24 @@
+[package]
+name = "lex-os-guest"
+description = "Agent binary that runs inside the lex-os microVM. Connects to the host supervisor over vsock, drives the LLM reasoning loop."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "lex-os-guest"
+path = "src/main.rs"
+
+[features]
+# Enable the real AF_VSOCK transport. Requires Linux + the vsock feature
+# in lex-os-proto. On macOS, the simulated transport is used instead.
+vsock = ["lex-os-proto/vsock"]
+
+[dependencies]
+lex-os-proto = { path = "../lex-os-proto" }
+serde_json.workspace = true
+anyhow.workspace = true
+ureq = { version = "2", features = ["json"] }
