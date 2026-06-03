@@ -49,6 +49,15 @@ impl FirecrackerVm {
     }
 }
 
+impl Drop for FirecrackerVm {
+    /// Defense-in-depth: if the handle is dropped without an explicit
+    /// `kill()` (e.g. a partial provision, or a panic between spawn and being
+    /// stored), reap the child so we never orphan a firecracker process.
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
 pub(super) fn build_firecracker_argv(sock: &Path) -> Vec<String> {
     vec!["--api-sock".to_string(), sock.display().to_string()]
 }

@@ -96,7 +96,57 @@ impl Perimeter for FirecrackerPerimeter {
                 available: self.max_floor().as_str(),
             });
         }
+        // Boot can fail partway (e.g. the tap is created but InstanceStart
+        // errors). On any failure, roll back host state so we never leak a
+        // tap, iptables rules, a stale socket, or the firecracker child (the
+        // child is reaped by `FirecrackerVm`'s Drop when the local `vm` here
+        // is dropped on the error path).
+        match self.boot_microvm(&policy) {
+            Ok(vm) => {
+                self.policy = Some(policy);
+                self.state = BoxState::Alive;
+                self.vm = Some(vm);
+                Ok(())
+            }
+            Err(e) => {
+                self.teardown_host();
+                Err(e)
+            }
+        }
+    }
 
+    fn is_alive(&self) -> bool {
+        self.state == BoxState::Alive
+    }
+
+    fn check(&self, dim: Dimension, required: Level) -> Result<(), PerimeterError> {
+        if self.state != BoxState::Alive {
+            return Err(PerimeterError::NotAlive);
+        }
+        let policy = self.policy.clone().ok_or(PerimeterError::NotAlive)?;
+        if policy.permits(dim, required) {
+            Ok(())
+        } else {
+            Err(PerimeterError::Blocked(format!(
+                "{dim} ≥ {required} not permitted by sandbox policy"
+            )))
+        }
+    }
+
+    fn destroy(&mut self, _reason: &str) {
+        if let Some(mut vm) = self.vm.take() {
+            vm.kill();
+        }
+        self.teardown_host();
+        self.state = BoxState::Dead;
+    }
+}
+
+impl FirecrackerPerimeter {
+    /// Boot the microVM and install the host egress wall, returning the live
+    /// child handle. Performs no `self` state mutation so the caller can roll
+    /// back cleanly on error.
+    fn boot_microvm(&self, policy: &SandboxPolicy) -> Result<FirecrackerVm, PerimeterError> {
         // 1. Clean any stale socket from a previous crashed run.
         let _ = std::fs::remove_file(&self.assets.socket);
 
@@ -143,38 +193,15 @@ impl Perimeter for FirecrackerPerimeter {
         })
         .map_err(perimeter_err)?;
 
-        self.policy = Some(policy);
-        self.state = BoxState::Alive;
-        self.vm = Some(vm);
-        Ok(())
+        Ok(vm)
     }
 
-    fn is_alive(&self) -> bool {
-        self.state == BoxState::Alive
-    }
-
-    fn check(&self, dim: Dimension, required: Level) -> Result<(), PerimeterError> {
-        if self.state != BoxState::Alive {
-            return Err(PerimeterError::NotAlive);
-        }
-        let policy = self.policy.clone().ok_or(PerimeterError::NotAlive)?;
-        if policy.permits(dim, required) {
-            Ok(())
-        } else {
-            Err(PerimeterError::Blocked(format!(
-                "{dim} ≥ {required} not permitted by sandbox policy"
-            )))
-        }
-    }
-
-    fn destroy(&mut self, _reason: &str) {
-        if let Some(mut vm) = self.vm.take() {
-            vm.kill();
-        }
+    /// Remove the host-side footprint: egress rules, tap device, API socket.
+    /// Idempotent — every step ignores "already gone".
+    fn teardown_host(&self) {
         let _ = flush_egress_rules(&self.assets.tap);
         let _ = destroy_tap(&self.assets.tap);
         let _ = std::fs::remove_file(&self.assets.socket);
-        self.state = BoxState::Dead;
     }
 }
 
