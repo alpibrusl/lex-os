@@ -1,26 +1,58 @@
 //! Firecracker microVM perimeter backend (feature = "firecracker").
 //!
 //! This module provides a [`FirecrackerPerimeter`] that implements the
-//! [`Perimeter`] trait against Firecracker's HTTP management API.  The
-//! real provisioning would POST to the `/actions` endpoint; this
-//! skeleton simulates the side-effect so the mediation loop, audit log,
-//! and policy checks are all exercisable without a KVM host.  Swap the
-//! `provision` body for the real HTTP calls to go live.
+//! [`Perimeter`] trait against Firecracker's HTTP management API.
 
 mod api;
 mod net;
 mod vm;
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use api::{put_json, wait_for_socket, with_socket};
+use net::{create_tap, destroy_tap, flush_egress_rules, install_egress_allowlist};
+use vm::FirecrackerVm;
+
 use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
 use lex_os_manifest::{Dimension, IsolationFloor, Level};
 
-/// A perimeter backed by a Firecracker microVM.  In production, `provision`
-/// calls the Firecracker management API (HTTP to `/actions`) to start a
-/// fresh VM; here the call is simulated so the trait contract is testable
-/// everywhere a Perimeter is needed.
+/// Paths the perimeter needs to find at runtime. Override per-instance for
+/// tests; the defaults match what `demo/setup-assets.sh` produces.
+pub struct FirecrackerAssets {
+    pub kernel: PathBuf,
+    pub rootfs: PathBuf,
+    pub socket: PathBuf,
+    pub tap: String,
+    /// Host IP on the tap, CIDR form. The guest gets the .2 address.
+    pub host_ip_cidr: String,
+    /// Kernel command line. The default boots the demo's guest-side attack
+    /// script (`init=/sbin/init.demo`, injected into the rootfs by
+    /// `demo/setup-assets.sh`); a real agent run overrides this via
+    /// [`FirecrackerPerimeter::with_assets`].
+    pub boot_args: String,
+}
+
+impl Default for FirecrackerAssets {
+    fn default() -> Self {
+        Self {
+            kernel: PathBuf::from("demo/assets/vmlinux"),
+            rootfs: PathBuf::from("demo/assets/rootfs.ext4"),
+            socket: PathBuf::from("/tmp/firecracker-lex-os.sock"),
+            tap: "tap-lex0".into(),
+            host_ip_cidr: "169.254.42.1/30".into(),
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.demo".into(),
+        }
+    }
+}
+
+/// A perimeter backed by a Firecracker microVM.  `provision` calls the
+/// Firecracker management API to spawn a fresh VM and configure it.
 pub struct FirecrackerPerimeter {
     policy: Option<SandboxPolicy>,
     state: BoxState,
+    assets: FirecrackerAssets,
+    vm: Option<FirecrackerVm>,
 }
 
 impl Default for FirecrackerPerimeter {
@@ -31,11 +63,21 @@ impl Default for FirecrackerPerimeter {
 
 impl FirecrackerPerimeter {
     pub fn new() -> Self {
+        Self::with_assets(FirecrackerAssets::default())
+    }
+
+    pub fn with_assets(assets: FirecrackerAssets) -> Self {
         Self {
             policy: None,
             state: BoxState::Dead,
+            assets,
+            vm: None,
         }
     }
+}
+
+fn perimeter_err<E: std::fmt::Display>(e: E) -> PerimeterError {
+    PerimeterError::Blocked(format!("firecracker backend: {e}"))
 }
 
 impl Perimeter for FirecrackerPerimeter {
@@ -47,9 +89,6 @@ impl Perimeter for FirecrackerPerimeter {
         IsolationFloor::MicroVm
     }
 
-    /// Provision a fresh microVM for `policy`.  A real implementation would
-    /// call the Firecracker HTTP `/actions` endpoint here; this skeleton
-    /// simulates success so the loop is testable without KVM.
     fn provision(&mut self, policy: SandboxPolicy) -> Result<(), PerimeterError> {
         if policy.required_floor > self.max_floor() {
             return Err(PerimeterError::FloorUnavailable {
@@ -57,10 +96,23 @@ impl Perimeter for FirecrackerPerimeter {
                 available: self.max_floor().as_str(),
             });
         }
-        // Real: POST to Firecracker /actions { action_type: "InstanceStart" }
-        self.policy = Some(policy);
-        self.state = BoxState::Alive;
-        Ok(())
+        // Boot can fail partway (e.g. the tap is created but InstanceStart
+        // errors). On any failure, roll back host state so we never leak a
+        // tap, iptables rules, a stale socket, or the firecracker child (the
+        // child is reaped by `FirecrackerVm`'s Drop when the local `vm` here
+        // is dropped on the error path).
+        match self.boot_microvm(&policy) {
+            Ok(vm) => {
+                self.policy = Some(policy);
+                self.state = BoxState::Alive;
+                self.vm = Some(vm);
+                Ok(())
+            }
+            Err(e) => {
+                self.teardown_host();
+                Err(e)
+            }
+        }
     }
 
     fn is_alive(&self) -> bool {
@@ -82,8 +134,80 @@ impl Perimeter for FirecrackerPerimeter {
     }
 
     fn destroy(&mut self, _reason: &str) {
-        // Real: POST to Firecracker /actions { action_type: "SendCtrlAltDel" }
+        if let Some(mut vm) = self.vm.take() {
+            vm.kill();
+        }
+        self.teardown_host();
         self.state = BoxState::Dead;
+    }
+}
+
+impl FirecrackerPerimeter {
+    /// Boot the microVM and install the host egress wall, returning the live
+    /// child handle. Performs no `self` state mutation so the caller can roll
+    /// back cleanly on error.
+    fn boot_microvm(&self, policy: &SandboxPolicy) -> Result<FirecrackerVm, PerimeterError> {
+        // 1. Clear leftovers from a previous crashed run (stale API socket,
+        //    tap device, and our iptables rules) so provisioning is idempotent
+        //    — otherwise `ip tuntap add` fails with EBUSY on a lingering tap.
+        self.teardown_host();
+
+        // 2. Create the host tap and install the egress wall BEFORE telling
+        //    firecracker about the interface. Firecracker opens the tap by name
+        //    when `/network-interfaces` is configured, so the device must
+        //    already exist — if we created it afterwards, our `ip tuntap add`
+        //    would race firecracker for the name and fail with EBUSY.
+        create_tap(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
+        install_egress_allowlist(&self.assets.tap, &policy.egress).map_err(perimeter_err)?;
+
+        // 3. Spawn firecracker; wait for the API socket to accept connections.
+        let vm = FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?;
+        wait_for_socket(&self.assets.socket, Duration::from_secs(2)).map_err(perimeter_err)?;
+
+        // 4. Configure the boot source.
+        let boot = format!(
+            r#"{{"kernel_image_path":"{}","boot_args":"{}"}}"#,
+            self.assets.kernel.display(),
+            self.assets.boot_args
+        );
+        with_socket(&self.assets.socket, |s| put_json(s, "/boot-source", &boot))
+            .map_err(perimeter_err)?;
+
+        // 5. Configure the rootfs drive (writable; the agent is root inside).
+        let drive = format!(
+            r#"{{"drive_id":"rootfs","path_on_host":"{}","is_root_device":true,"is_read_only":false}}"#,
+            self.assets.rootfs.display()
+        );
+        with_socket(&self.assets.socket, |s| {
+            put_json(s, "/drives/rootfs", &drive)
+        })
+        .map_err(perimeter_err)?;
+
+        // 6. Configure the network interface (the tap already exists, step 2).
+        let net = format!(
+            r#"{{"iface_id":"eth0","host_dev_name":"{}"}}"#,
+            self.assets.tap
+        );
+        with_socket(&self.assets.socket, |s| {
+            put_json(s, "/network-interfaces/eth0", &net)
+        })
+        .map_err(perimeter_err)?;
+
+        // 7. Start the VM. Firecracker's /actions is a PUT (it has no POST).
+        with_socket(&self.assets.socket, |s| {
+            put_json(s, "/actions", r#"{"action_type":"InstanceStart"}"#)
+        })
+        .map_err(perimeter_err)?;
+
+        Ok(vm)
+    }
+
+    /// Remove the host-side footprint: egress rules, tap device, API socket.
+    /// Idempotent — every step ignores "already gone".
+    fn teardown_host(&self) {
+        let _ = flush_egress_rules(&self.assets.tap);
+        let _ = destroy_tap(&self.assets.tap);
+        let _ = std::fs::remove_file(&self.assets.socket);
     }
 }
 
@@ -106,12 +230,8 @@ mod tests {
         perim.provision(policy).expect("provision should succeed");
         assert!(perim.is_alive());
 
-        assert!(perim
-            .check(Dimension::Filesystem, Level::ReadOnly)
-            .is_ok());
-        assert!(perim
-            .check(Dimension::Network, Level::Allowlist)
-            .is_err());
+        assert!(perim.check(Dimension::Filesystem, Level::ReadOnly).is_ok());
+        assert!(perim.check(Dimension::Network, Level::Allowlist).is_err());
 
         perim.destroy("test teardown");
         assert!(!perim.is_alive());
