@@ -94,7 +94,10 @@ impl Provider for AnthropicProvider {
             .set("anthropic-version", "2023-06-01")
             .send_json(body)?
             .into_json()?;
-        let text = resp["content"][0]["text"].as_str().unwrap_or("").to_string();
+        let text = resp["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         Ok(text)
     }
 
@@ -226,7 +229,11 @@ impl<P: Provider> Agent for LlmAgent<P> {
         }
 
         let prompt = self.build_prompt(view);
-        eprintln!("[llm-agent:{}] step {} → asking model", self.provider.name(), view.step);
+        eprintln!(
+            "[llm-agent:{}] step {} → asking model",
+            self.provider.name(),
+            view.step
+        );
 
         match self.provider.complete(&prompt) {
             Err(e) => {
@@ -353,7 +360,10 @@ mod tests {
     #[test]
     fn parse_done_action() {
         let m = Manifest::new(Goal::new("test"), Grant::top(), Budget::research_default());
-        assert!(matches!(parse_action(r#"{"action":"done"}"#, &m), Some(AgentAction::Done)));
+        assert!(matches!(
+            parse_action(r#"{"action":"done"}"#, &m),
+            Some(AgentAction::Done)
+        ));
     }
 
     #[test]

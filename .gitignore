@@ -6,3 +6,4 @@ Cargo.lock
 *.audit.json
 /demo/audit.json
 /demo/stub.log
+demo/agent-audit.json
