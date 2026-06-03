@@ -1,5 +1,6 @@
 //! Host-side tap device + iptables rule management.
 
+use std::net::ToSocketAddrs;
 use std::process::Command;
 
 #[derive(Debug, thiserror::Error)]
@@ -67,13 +68,39 @@ pub(super) fn create_tap(tap: &str, host_ip_cidr: &str) -> Result<(), NetError> 
 pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(), NetError> {
     for entry in egress {
         let (host, port) = parse_host_port(entry)?;
-        run(
-            "iptables",
-            &as_str_slice(&build_iptables_accept_rule(tap, &host, port)),
-        )?;
+        // Resolve to an IP ourselves and pin the rule to it. Letting iptables
+        // resolve `-d <name>` is brittle (it fails the whole insert if the name
+        // is unknown on the host) and ambiguous (it may differ from what the
+        // guest dials). If a host does not resolve, skip its ACCEPT and warn —
+        // the box simply can't reach it (fail-closed), which never widens the
+        // grant, so provisioning still proceeds.
+        match resolve_host(&host, port) {
+            Some(ip) => {
+                let ip = ip.to_string();
+                run(
+                    "iptables",
+                    &as_str_slice(&build_iptables_accept_rule(tap, &ip, port)),
+                )?;
+            }
+            None => {
+                eprintln!(
+                    "lex-os perimeter: egress host `{host}:{port}` does not resolve on this host; \
+                     the box cannot reach it (ACCEPT skipped, fail-closed)"
+                );
+            }
+        }
     }
     run("iptables", &as_str_slice(&build_iptables_drop_rule(tap)))?;
     Ok(())
+}
+
+/// Resolve `host:port` to a single IP, or `None` if it does not resolve.
+fn resolve_host(host: &str, port: u16) -> Option<std::net::IpAddr> {
+    (host, port)
+        .to_socket_addrs()
+        .ok()?
+        .next()
+        .map(|sa| sa.ip())
 }
 
 /// Remove only the FORWARD rules this backend added (scoped to `tap`).
