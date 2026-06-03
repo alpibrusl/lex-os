@@ -1,9 +1,5 @@
 //! Host-side tap device + iptables rule management.
 
-// These shell-out helpers are wired into provision()/destroy() in a later
-// task (#14); allow dead_code until then.
-#![allow(dead_code)]
-
 use std::process::Command;
 
 #[derive(Debug, thiserror::Error)]

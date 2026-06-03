@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use api::{post_json, put_json, wait_for_socket, with_socket};
-use net::{create_tap, install_egress_allowlist};
+use net::{create_tap, destroy_tap, flush_egress_rules, install_egress_allowlist};
 use vm::FirecrackerVm;
 
 use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
@@ -161,7 +161,12 @@ impl Perimeter for FirecrackerPerimeter {
     }
 
     fn destroy(&mut self, _reason: &str) {
-        // Real: POST to Firecracker /actions { action_type: "SendCtrlAltDel" }
+        if let Some(mut vm) = self.vm.take() {
+            vm.kill();
+        }
+        let _ = flush_egress_rules(&self.assets.tap);
+        let _ = destroy_tap(&self.assets.tap);
+        let _ = std::fs::remove_file(&self.assets.socket);
         self.state = BoxState::Dead;
     }
 }
