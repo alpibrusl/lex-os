@@ -34,6 +34,16 @@ AUDIT_LOG=${AUDIT_LOG:-demo/audit.json}
 STUB_PORT=${STUB_PORT:-8443}
 STUB_PID=
 
+# Building needs the toolchain (a per-user rustup), not root; the privileged
+# work (KVM, tap, iptables) needs root. So when invoked under sudo, compile as
+# the original user and run the prebuilt binaries as root.
+CARGO=(cargo)
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  CARGO=(sudo -u "$SUDO_USER" -H -- cargo)
+fi
+LEXOS="$REPO_ROOT/target/debug/lex-os"
+STUB="$REPO_ROOT/target/debug/results-stub"
+
 cleanup() {
   if [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null; then
     kill "$STUB_PID" 2>/dev/null || true
@@ -54,15 +64,20 @@ if ! bash demo/host-check.sh; then
 fi
 
 say "Pre-flight: build"
-cargo build --quiet --features firecracker -p lex-os -p results-stub
+"${CARGO[@]}" build --quiet --features firecracker -p lex-os -p results-stub
+if [ ! -x "$LEXOS" ] || [ ! -x "$STUB" ]; then
+  echo "demo: build did not produce the binaries; build as your user first:" >&2
+  echo "      cargo build --features firecracker -p lex-os -p results-stub" >&2
+  exit 1
+fi
 
 say "Scene 1 — Wall 1: type-check"
 echo "+ benign program against the demo grant — must pass"
-cargo run --quiet -p lex-os -- check --grant "$MANIFEST" "$BENIGN_PROGRAM"
+"$LEXOS" check --grant "$MANIFEST" "$BENIGN_PROGRAM"
 echo
 echo "+ adversarial program (declares [net(\"evil.com\")]) — must be refused"
 set +e
-cargo run --quiet -p lex-os -- check --grant "$MANIFEST" "$ATTACK_TYPECHECK"
+"$LEXOS" check --grant "$MANIFEST" "$ATTACK_TYPECHECK"
 typecheck_exit=$?
 set -e
 if [ "$typecheck_exit" -ne 8 ]; then
@@ -72,7 +87,7 @@ fi
 echo "+ exit code $typecheck_exit (PreconditionFailed) — wall held"
 
 say "Scene 2 — results.demo.internal stub"
-./target/debug/results-stub --listen "127.0.0.1:${STUB_PORT}" > demo/stub.log 2>&1 &
+"$STUB" --listen "127.0.0.1:${STUB_PORT}" > demo/stub.log 2>&1 &
 STUB_PID=$!
 # Wait until the stub is actually accepting connections (no blind sleeps).
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -90,11 +105,11 @@ echo "  as /sbin/init.demo). Its console output — allowed target OK, evil.com"
 echo "  and 8.8.8.8 blocked at the host tap's iptables — is captured below."
 echo "+ Wall 3 (grant narrowing) fires in the same mediation loop."
 echo
-cargo run --quiet --features firecracker -p lex-os -- run --manifest "$MANIFEST" --audit-out "$AUDIT_LOG"
+"$LEXOS" run --manifest "$MANIFEST" --audit-out "$AUDIT_LOG"
 
 say "Scene 4 — audit verification"
 echo "+ hash chain"
-cargo run --quiet -p lex-os -- audit verify --log "$AUDIT_LOG"
+"$LEXOS" audit verify --log "$AUDIT_LOG"
 echo
 echo "+ key events"
 if command -v jq >/dev/null 2>&1; then
