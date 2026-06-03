@@ -152,11 +152,19 @@ impl FirecrackerPerimeter {
         //    — otherwise `ip tuntap add` fails with EBUSY on a lingering tap.
         self.teardown_host();
 
-        // 2. Spawn firecracker; wait for the API socket to accept connections.
+        // 2. Create the host tap and install the egress wall BEFORE telling
+        //    firecracker about the interface. Firecracker opens the tap by name
+        //    when `/network-interfaces` is configured, so the device must
+        //    already exist — if we created it afterwards, our `ip tuntap add`
+        //    would race firecracker for the name and fail with EBUSY.
+        create_tap(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
+        install_egress_allowlist(&self.assets.tap, &policy.egress).map_err(perimeter_err)?;
+
+        // 3. Spawn firecracker; wait for the API socket to accept connections.
         let vm = FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?;
         wait_for_socket(&self.assets.socket, Duration::from_secs(2)).map_err(perimeter_err)?;
 
-        // 3. Configure the boot source.
+        // 4. Configure the boot source.
         let boot = format!(
             r#"{{"kernel_image_path":"{}","boot_args":"{}"}}"#,
             self.assets.kernel.display(),
@@ -165,7 +173,7 @@ impl FirecrackerPerimeter {
         with_socket(&self.assets.socket, |s| put_json(s, "/boot-source", &boot))
             .map_err(perimeter_err)?;
 
-        // 4. Configure the rootfs drive (writable; the agent is root inside).
+        // 5. Configure the rootfs drive (writable; the agent is root inside).
         let drive = format!(
             r#"{{"drive_id":"rootfs","path_on_host":"{}","is_root_device":true,"is_read_only":false}}"#,
             self.assets.rootfs.display()
@@ -175,7 +183,7 @@ impl FirecrackerPerimeter {
         })
         .map_err(perimeter_err)?;
 
-        // 5. Configure the network interface (host_dev_name created next).
+        // 6. Configure the network interface (the tap already exists, step 2).
         let net = format!(
             r#"{{"iface_id":"eth0","host_dev_name":"{}"}}"#,
             self.assets.tap
@@ -184,10 +192,6 @@ impl FirecrackerPerimeter {
             put_json(s, "/network-interfaces/eth0", &net)
         })
         .map_err(perimeter_err)?;
-
-        // 6. Create the tap on the host and install the egress allowlist.
-        create_tap(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
-        install_egress_allowlist(&self.assets.tap, &policy.egress).map_err(perimeter_err)?;
 
         // 7. Start the VM.
         with_socket(&self.assets.socket, |s| {
