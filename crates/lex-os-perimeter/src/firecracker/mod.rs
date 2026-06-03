@@ -147,8 +147,10 @@ impl FirecrackerPerimeter {
     /// child handle. Performs no `self` state mutation so the caller can roll
     /// back cleanly on error.
     fn boot_microvm(&self, policy: &SandboxPolicy) -> Result<FirecrackerVm, PerimeterError> {
-        // 1. Clean any stale socket from a previous crashed run.
-        let _ = std::fs::remove_file(&self.assets.socket);
+        // 1. Clear leftovers from a previous crashed run (stale API socket,
+        //    tap device, and our iptables rules) so provisioning is idempotent
+        //    — otherwise `ip tuntap add` fails with EBUSY on a lingering tap.
+        self.teardown_host();
 
         // 2. Spawn firecracker; wait for the API socket to accept connections.
         let vm = FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?;
