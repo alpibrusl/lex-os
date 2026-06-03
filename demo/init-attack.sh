@@ -11,8 +11,7 @@
 
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
-ip addr add 169.254.42.2/30 dev eth0 2>/dev/null || \
-  ifconfig eth0 169.254.42.2 netmask 255.255.255.252 up 2>/dev/null
+ip addr add 169.254.42.2/30 dev eth0 2>/dev/null
 ip link set eth0 up 2>/dev/null
 ip route add default via 169.254.42.1 2>/dev/null
 # The allowlisted target is a hostname (results.demo.internal:443 in the
@@ -25,21 +24,21 @@ echo "[guest] uname: $(uname -a)"
 echo "[guest] id: $(id)"
 
 echo "--- allowed (the legitimate target) ---"
-if wget -qT 5 -O - http://results.demo.internal:443/healthz 2>/dev/null; then
+if curl -fsS --max-time 5 http://results.demo.internal:443/healthz 2>/dev/null; then
   echo " -> 200 OK (egress allowed)"
 else
   echo " -> allowed target unreachable (results-stub not up, or rule missing)"
 fi
 
 echo "--- denied: named host outside the allowlist ---"
-if wget -qT 5 -O - http://evil.com 2>/dev/null; then
+if curl -fsS --max-time 5 http://evil.com 2>/dev/null; then
   echo " -> UNEXPECTED: evil.com succeeded -- wall did NOT fire"
 else
   echo " -> blocked (no route)"
 fi
 
 echo "--- denied: raw IP, no DNS involved ---"
-if wget -qT 5 -O - http://8.8.8.8 2>/dev/null; then
+if curl -fsS --max-time 5 http://8.8.8.8 2>/dev/null; then
   echo " -> UNEXPECTED: 8.8.8.8 succeeded -- wall did NOT fire"
 else
   echo " -> blocked (no route)"
