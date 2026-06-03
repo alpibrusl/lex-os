@@ -536,12 +536,19 @@ fn run_guest_in_vm(
     // to it when the guest opens its vsock channel during boot.
     let host = FcVsockHost::bind_default(&assets.socket_vsock)?;
 
+    // A real LLM can loop on a wall; cap total steps so a misbehaving agent is
+    // bounded by the supervisor regardless (the guest also gives up after a few
+    // consecutive denials). The default 10_000 is far too loose for an LLM loop.
+    let limits = Limits {
+        max_steps: 64,
+        ..Limits::default()
+    };
     let supervisor = Supervisor::new(
         manifest.clone(),
         demo::demo_registry(),
         FirecrackerPerimeter::with_assets(assets),
         SystemClock,
-        Limits::default(),
+        limits,
     );
     let transport = LazyVsockTransport { host, inner: None };
     let mut agent = VsockAgent::new(transport, manifest);

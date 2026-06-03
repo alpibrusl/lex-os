@@ -67,6 +67,8 @@ Two boundaries, kept strictly separate:
 | [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: derives an OS **sandbox policy** from the grant; pluggable isolation backends. |
 | [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied. |
 | [`lex-os-supervisor`](crates/lex-os-supervisor) | The mediated command loop: capability + reversibility + **budget** gates, liveness, and **reprovision-on-death**. |
+| [`lex-os-proto`](crates/lex-os-proto) | Wire protocol between the supervisor (host) and the agent running inside the microVM — vsock transport (`AF_VSOCK` guest side, Unix-socket host side). |
+| [`lex-os-guest`](crates/lex-os-guest) | The agent binary that runs **inside** the box: drives an LLM reasoning loop and relays each action to the supervisor for mediation. |
 | [`lex-os`](crates/lex-os) | The CLI, speaking the [acli](https://github.com/alpibrusl/acli) protocol so agents can discover and drive it. |
 | [`manifests/`](manifests) | The manifest format and bounded commands as a **Lex package**. |
 
@@ -103,6 +105,50 @@ manifest + last checkpoint. It then reaches for `net.fetch`, `exec.shell`
 and `fs.delete_all` — all refused, because the demo grant is
 filesystem-only and the consequential command has no approval path. The
 session ends `GoalMet`, and the audit log is hash-verified.
+
+### On a real microVM (KVM host + root)
+
+The commands above use the in-process *simulated* perimeter, which runs
+anywhere but is **not** a security boundary. On a Linux host with `/dev/kvm`
+the same loop runs behind a real Firecracker microVM:
+
+```sh
+sudo bash demo/setup-assets.sh    # fetch firecracker + kernel + rootfs (one-time)
+sudo bash demo/run.sh             # supervisor lifecycle: provision → destroy → reprovision
+sudo bash demo/wall2.sh           # kernel egress wall: curl 8.8.8.8 blocked from inside the box
+sudo bash demo/agent.sh           # a real LLM agent running INSIDE the microVM (local Ollama)
+sudo bash demo/agent.sh demo/manifest-agent-none.json   # same, with network denied by the grant
+```
+
+## What the demo proves today
+
+Run on a KVM host (a laptop with `/dev/kvm`), with the agent's model served
+locally by [Ollama] on the LAN:
+
+- **A real LLM agent runs *inside* a Firecracker microVM.** `lex-os-guest`
+  boots in the VM, reasons with a local model (e.g. `devstral-small-2`), and
+  relays every proposed action to the supervisor over vsock. The model is
+  reached over the **one** egress target the grant allows — nothing else.
+- **The three walls hold against that live agent**, each at a different layer:
+  - **type-check wall** — a program whose effects exceed the grant is refused
+    *before it runs* (`lex-os check`, exit 8);
+  - **kernel egress wall** — from inside the booted microVM, traffic to a
+    non-allowlisted host is dropped at the host's tap (`8.8.8.8` blocked);
+  - **narrowing wall** — the agent's attempt to widen its own grant
+    (`propose_child`) is rejected; the grant only ever narrows.
+- With a `network: none` grant, the agent's `net.fetch` and `exec.shell` are
+  **denied at mediation**, while it can still reach its model (kernel egress
+  allowlist) — one manifest expressing both. It gives up after repeated
+  refusals; the supervisor caps total steps regardless.
+- Every step lands in the **hash-chained audit log**, verified after the run.
+
+What this is *not* yet: the perimeter is single-tenant and runs as root (no
+jailer); reprovision-on-death doesn't yet re-attach the in-VM agent's vsock;
+the model is reached over the LAN rather than served in-box. It's an honest
+proof-of-concept of the design, demonstrated end-to-end on real hardware —
+not a hardened product.
+
+[Ollama]: https://ollama.com
 
 ### Refuse, don't downgrade
 

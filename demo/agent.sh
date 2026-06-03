@@ -17,6 +17,12 @@ cd "$REPO_ROOT"
 
 OLLAMA="${OLLAMA:-192.168.1.165:11434}"
 MODEL="${MODEL:-devstral-small-2:latest}"
+# Manifest: first positional arg (survives sudo, unlike env), else $MANIFEST, else default.
+# demo/manifest-agent.json: net=allowlist (agent may call the net).
+# demo/manifest-agent-none.json: net=none → net.fetch DENIED, all walls fire (the agent
+# still reaches its model, which is the kernel egress allowlist, not the grant level).
+#   sudo bash demo/agent.sh demo/manifest-agent-none.json
+MANIFEST="${1:-${MANIFEST:-demo/manifest-agent.json}}"
 
 # Build as the invoking user (root has no rustup toolchain); run as root.
 CARGO=(cargo)
@@ -35,8 +41,8 @@ echo "+ build lex-os (--features firecracker)"
 echo "+ build + inject the in-VM agent binary into the rootfs"
 bash demo/setup-assets.sh >/dev/null
 
-echo "+ booting in-VM agent (ollama=$OLLAMA model=$MODEL)"
-# manifest-agent.json allowlists the Ollama host as the box's ONE egress target.
-# If you override OLLAMA, update demo/manifest-agent.json's egress to match.
-"$LEXOS" run --agent guest --manifest demo/manifest-agent.json \
+echo "+ booting in-VM agent (manifest=$MANIFEST ollama=$OLLAMA model=$MODEL)"
+# The manifest's egress allowlists the Ollama host as the box's ONE egress target.
+# If you override OLLAMA, update the manifest's egress to match.
+"$LEXOS" run --agent guest --manifest "$MANIFEST" \
   --ollama-url "http://$OLLAMA" --model "$MODEL" --audit-out demo/agent-audit.json

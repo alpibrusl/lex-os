@@ -35,9 +35,32 @@ fn main() -> anyhow::Result<()> {
     let mut transport = connect_transport()?;
     eprintln!("[guest] transport connected");
 
+    // Give up after this many consecutive denied/blocked outcomes. A real model
+    // may keep hammering a wall (devstral does); the agent must recognise it's
+    // stuck and stop rather than loop until the supervisor's step ceiling.
+    const MAX_CONSECUTIVE_DENIALS: u32 = 4;
+    let mut consecutive_denials = 0u32;
+
     loop {
         let view = transport.recv_view().context("recv view")?;
         eprintln!("[guest] step {} goal={}", view.step, view.goal);
+
+        // A denied/blocked last outcome means the previous action hit a wall.
+        let hit_wall = view
+            .last_outcome
+            .as_deref()
+            .map(|o| o.contains("denied") || o.contains("blocked"))
+            .unwrap_or(false);
+        consecutive_denials = if hit_wall { consecutive_denials + 1 } else { 0 };
+        if consecutive_denials >= MAX_CONSECUTIVE_DENIALS {
+            eprintln!(
+                "[guest] {consecutive_denials} consecutive walls — giving up, signalling done"
+            );
+            transport
+                .send_action(&AgentActionMsg::Done)
+                .context("send action")?;
+            break;
+        }
 
         let prompt = build_prompt(&view);
         let action = match call_ollama(&ollama_host, &model, &prompt) {
