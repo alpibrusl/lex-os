@@ -45,8 +45,14 @@ pub fn simulated_pair() -> (SimulatedTransport, SimulatedGuestTransport) {
     let (host_tx, guest_rx) = mpsc::sync_channel(8);
     let (guest_tx, host_rx) = mpsc::sync_channel(8);
     (
-        SimulatedTransport { tx: host_tx, rx: host_rx },
-        SimulatedGuestTransport { tx: guest_tx, rx: guest_rx },
+        SimulatedTransport {
+            tx: host_tx,
+            rx: host_rx,
+        },
+        SimulatedGuestTransport {
+            tx: guest_tx,
+            rx: guest_rx,
+        },
     )
 }
 
@@ -96,7 +102,9 @@ impl<R: BufRead + Send, W: Write + Send> Transport for StreamTransport<R, W> {
     fn send_view(&mut self, view: &AgentViewMsg) -> anyhow::Result<()> {
         let mut line = serde_json::to_string(view).context("serialise view")?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).context("write view")?;
+        self.writer
+            .write_all(line.as_bytes())
+            .context("write view")?;
         self.writer.flush().context("flush")?;
         Ok(())
     }
@@ -130,7 +138,9 @@ impl<R: BufRead + Send, W: Write + Send> GuestTransport for StreamGuestTransport
     fn send_action(&mut self, action: &AgentActionMsg) -> anyhow::Result<()> {
         let mut line = serde_json::to_string(action).context("serialise action")?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).context("write action")?;
+        self.writer
+            .write_all(line.as_bytes())
+            .context("write action")?;
         self.writer.flush().context("flush")?;
         Ok(())
     }
@@ -156,7 +166,9 @@ mod tests {
         assert_eq!(received.step, 0);
         assert_eq!(received.goal, "test");
 
-        let action = AgentActionMsg::Run { command: "fs.read".into() };
+        let action = AgentActionMsg::Run {
+            command: "fs.read".into(),
+        };
         guest.send_action(&action).unwrap();
 
         let received_action = host.recv_action().unwrap();
@@ -166,7 +178,12 @@ mod tests {
     #[test]
     fn simulated_pair_done_action() {
         let (mut host, mut guest) = simulated_pair();
-        let view = AgentViewMsg { goal: "g".into(), step: 1, last_outcome: None, completed: vec![] };
+        let view = AgentViewMsg {
+            goal: "g".into(),
+            step: 1,
+            last_outcome: None,
+            completed: vec![],
+        };
         host.send_view(&view).unwrap();
         guest.recv_view().unwrap();
         guest.send_action(&AgentActionMsg::Done).unwrap();
@@ -186,15 +203,14 @@ mod tests {
         };
         let mut buf = Vec::new();
         {
-            let mut host = StreamTransport::new(
-                BufReader::new(Cursor::new(b"" as &[u8])),
-                &mut buf,
-            );
+            let mut host =
+                StreamTransport::new(BufReader::new(Cursor::new(b"" as &[u8])), &mut buf);
             host.send_view(&view).unwrap();
         }
         assert!(buf.ends_with(b"\n"));
 
-        let mut guest = StreamGuestTransport::new(BufReader::new(Cursor::new(buf)), std::io::sink());
+        let mut guest =
+            StreamGuestTransport::new(BufReader::new(Cursor::new(buf)), std::io::sink());
         let received = guest.recv_view().unwrap();
         assert_eq!(received.step, 5);
         assert_eq!(received.completed, vec!["fs.list"]);

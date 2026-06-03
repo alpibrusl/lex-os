@@ -26,7 +26,11 @@ pub mod msg;
 pub mod transport;
 
 pub use msg::{AgentActionMsg, AgentViewMsg};
-pub use transport::{Transport, simulated_pair, SimulatedTransport};
+pub use transport::{simulated_pair, SimulatedTransport, Transport};
+
+/// Host-side Firecracker vsock channel (plain Unix sockets, std only).
+#[cfg(unix)]
+pub mod fc_host;
 
 /// The vsock port the supervisor listens on and the guest connects to.
 /// Guest CID is assigned by the hypervisor; host CID is always 2.

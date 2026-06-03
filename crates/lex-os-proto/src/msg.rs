@@ -48,7 +48,9 @@ mod tests {
 
     #[test]
     fn action_run_round_trips() {
-        let a = AgentActionMsg::Run { command: "net.fetch".into() };
+        let a = AgentActionMsg::Run {
+            command: "net.fetch".into(),
+        };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains("\"action\":\"run\""));
         let back: AgentActionMsg = serde_json::from_str(&json).unwrap();
@@ -63,7 +65,9 @@ mod tests {
 
     #[test]
     fn action_propose_child_round_trips() {
-        let a = AgentActionMsg::ProposeChild { reason: "need network".into() };
+        let a = AgentActionMsg::ProposeChild {
+            reason: "need network".into(),
+        };
         let json = serde_json::to_string(&a).unwrap();
         let back: AgentActionMsg = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, AgentActionMsg::ProposeChild { .. }));

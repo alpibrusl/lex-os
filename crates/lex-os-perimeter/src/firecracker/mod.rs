@@ -31,6 +31,13 @@ pub struct FirecrackerAssets {
     /// `demo/setup-assets.sh`); a real agent run overrides this via
     /// [`FirecrackerPerimeter::with_assets`].
     pub boot_args: String,
+    /// Host UDS base path for the guest↔supervisor vsock channel. Firecracker
+    /// connects to `${socket_vsock}_${port}` when the guest opens a vsock
+    /// connection. Empty disables the vsock device (the attack-script demo
+    /// doesn't need it; the in-VM agent does).
+    pub socket_vsock: PathBuf,
+    /// Guest context id for the vsock device (host is always CID 2).
+    pub guest_cid: u32,
 }
 
 impl Default for FirecrackerAssets {
@@ -42,6 +49,8 @@ impl Default for FirecrackerAssets {
             tap: "tap-lex0".into(),
             host_ip_cidr: "169.254.42.1/30".into(),
             boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.demo".into(),
+            socket_vsock: PathBuf::from("/tmp/firecracker-lex-os-vsock.sock"),
+            guest_cid: 3,
         }
     }
 }
@@ -192,6 +201,20 @@ impl FirecrackerPerimeter {
             put_json(s, "/network-interfaces/eth0", &net)
         })
         .map_err(perimeter_err)?;
+
+        // 6b. Configure the vsock device for the guest↔supervisor channel.
+        //     Skipped when socket_vsock is empty (the attack-script demo has no
+        //     in-guest agent). The host must already be listening on
+        //     `${socket_vsock}_${VSOCK_PORT}` (see lex_os_proto::fc_host).
+        if !self.assets.socket_vsock.as_os_str().is_empty() {
+            let vsock = format!(
+                r#"{{"guest_cid":{},"uds_path":"{}"}}"#,
+                self.assets.guest_cid,
+                self.assets.socket_vsock.display()
+            );
+            with_socket(&self.assets.socket, |s| put_json(s, "/vsock", &vsock))
+                .map_err(perimeter_err)?;
+        }
 
         // 7. Start the VM. Firecracker's /actions is a PUT (it has no POST).
         with_socket(&self.assets.socket, |s| {

@@ -10,9 +10,10 @@ authors.workspace = true
 
 [features]
 # Real AF_VSOCK transport — Linux only. Enable when building for a KVM host.
-vsock = []
+vsock = ["dep:libc"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+libc = { version = "0.2", optional = true }
