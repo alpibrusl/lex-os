@@ -34,10 +34,14 @@ impl FirecrackerVm {
             return Err(VmError::MissingBinary);
         }
         let argv = build_firecracker_argv(&sock);
+        // Inherit stdout/stderr so the guest serial console (ttyS0 → firecracker
+        // stdout) streams live to the operator — that's where the Wall-2 egress
+        // probes from init-attack.sh appear. (Folding the console into the audit
+        // log is a follow-up; for now it must at least be visible.)
         let child = Command::new("firecracker")
             .args(&argv)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(VmError::Spawn)?;
         Ok(Self { sock, child })
