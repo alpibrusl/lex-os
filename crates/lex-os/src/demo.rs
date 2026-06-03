@@ -111,7 +111,7 @@ impl DemoAgent {
             AgentAction::Run("net.fetch".into()), // denied unless network granted
             AgentAction::Run("exec.shell".into()), // denied unless exec granted
             AgentAction::Run("fs.delete_all".into()), // always refused (consequential)
-            widen_attempt,                            // always blocked by narrowing wall
+            widen_attempt,                        // always blocked by narrowing wall
             AgentAction::Run("report.write".into()),
             AgentAction::Done,
         ];
