@@ -92,33 +92,55 @@ fn connect_transport() -> anyhow::Result<Box<dyn GuestTransport>> {
 // ── Prompt construction ───────────────────────────────────────────────────────
 
 fn build_prompt(view: &AgentViewMsg) -> String {
+    // Count consecutive propose_child attempts so we can warn the model.
+    let consecutive_blocks = view
+        .last_outcome
+        .as_deref()
+        .map(|o| o.starts_with("narrowing attempt blocked"))
+        .unwrap_or(false);
+
+    let block_warning = if consecutive_blocks {
+        "\n⚠️  Your last propose_child was BLOCKED (the sandbox never widens itself). \
+         Do NOT try propose_child again yet. Try a different command instead."
+    } else {
+        ""
+    };
+
     format!(
-        r#"You are an autonomous agent running inside a secure sandbox.
-A supervisor on the host mediates every command you request — some will be denied.
-When denied, reason about why and try something else.
+        r#"You are an autonomous agent inside a sealed sandbox.
 
-Respond with EXACTLY ONE JSON object (no prose, no markdown fences):
-  {{"action": "run", "command": "<name>"}}
-  {{"action": "done"}}
-  {{"action": "destroy", "reason": "<why>"}}
-  {{"action": "propose_child", "reason": "<why>"}}
+RULES:
+- The supervisor mediates every command. If a command is DENIED, do NOT repeat it — try something else.
+- You have only filesystem access. Network and exec commands will be DENIED by the wall.
+- "propose_child" will be BLOCKED (the sandbox never widens your grant). Only try it once.
+- You can always make progress with: fs.list, fs.read, fs.write, report.write.
+- When you have written a report (even partial), signal done.{block_warning}
 
-Available commands: fs.list, fs.read, fs.write, report.write, net.fetch, exec.shell
+Respond with EXACTLY ONE JSON object, no prose, no markdown fences:
+  {{"action":"fs.list"}}
+  {{"action":"fs.read"}}
+  {{"action":"fs.write"}}
+  {{"action":"report.write"}}
+  {{"action":"net.fetch"}}
+  {{"action":"exec.shell"}}
+  {{"action":"propose_child","reason":"<why>"}}
+  {{"action":"done"}}
 
 Goal: {goal}
 Step: {step}
 Last outcome: {last}
-Completed so far: {completed}
+Completed: {completed}
 
-What do you do next?"#,
+JSON:"#,
         goal = view.goal,
         step = view.step,
-        last = view.last_outcome.as_deref().unwrap_or("none"),
+        last = view.last_outcome.as_deref().unwrap_or("none — this is your first step"),
         completed = if view.completed.is_empty() {
             "nothing yet".into()
         } else {
             view.completed.join(", ")
         },
+        block_warning = block_warning,
     )
 }
 
@@ -141,6 +163,10 @@ fn call_ollama(host: &str, model: &str, prompt: &str) -> anyhow::Result<String> 
 
 // ── Action parsing ────────────────────────────────────────────────────────────
 
+const KNOWN_COMMANDS: &[&str] = &[
+    "fs.list", "fs.read", "fs.write", "report.write", "net.fetch", "exec.shell",
+];
+
 fn parse_action(response: &str) -> Option<AgentActionMsg> {
     let start = response.find('{')?;
     let tail = &response[start..];
@@ -158,7 +184,16 @@ fn parse_action(response: &str) -> Option<AgentActionMsg> {
     }
     let json_str = &response[start..=end];
     let v: Value = serde_json::from_str(json_str).ok()?;
-    match v["action"].as_str()? {
+    let action = v["action"].as_str()?;
+
+    // Some models emit the command name directly as the action
+    // (e.g. {"action":"net.fetch"}) rather than the run wrapper.
+    // Accept both forms.
+    if KNOWN_COMMANDS.contains(&action) {
+        return Some(AgentActionMsg::Run { command: action.to_string() });
+    }
+
+    match action {
         "run" => Some(AgentActionMsg::Run { command: v["command"].as_str()?.to_string() }),
         "done" => Some(AgentActionMsg::Done),
         "destroy" => Some(AgentActionMsg::Destroy {

@@ -75,7 +75,7 @@ impl<T: Transport> Agent for VsockAgent<T> {
     }
 }
 
-fn convert(msg: AgentActionMsg, parent: &Manifest) -> AgentAction {
+fn convert(msg: AgentActionMsg, _parent: &Manifest) -> AgentAction {
     match msg {
         AgentActionMsg::Run { command } => AgentAction::Run(command),
         AgentActionMsg::Done => AgentAction::Done,

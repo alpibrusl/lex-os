@@ -28,6 +28,7 @@ use lex_os_manifest::Manifest;
 use lex_os_perimeter::FirecrackerPerimeter;
 #[cfg(not(feature = "firecracker"))]
 use lex_os_perimeter::SimulatedPerimeter;
+use lex_os_proto::transport::StreamTransport;
 use lex_os_resolver::{resolve, Environment};
 use lex_os_supervisor::{Limits, Supervisor, SystemClock};
 
@@ -75,6 +76,11 @@ enum AgentBackend {
     Anthropic,
     /// OpenAI-compatible endpoint (OPENAI_API_KEY env var required).
     OpenAi,
+    /// Spawn lex-os-guest as a subprocess (stdio transport). The guest
+    /// binary calls Ollama itself. Use this on macOS for a full end-to-end
+    /// test without Firecracker; on Linux with --features firecracker the
+    /// guest runs inside the microVM over vsock instead.
+    Guest,
 }
 
 #[derive(Subcommand)]
@@ -103,6 +109,9 @@ enum Cmd {
         /// Ollama base URL (default: http://localhost:11434).
         #[arg(long)]
         ollama_url: Option<String>,
+        /// Path to lex-os-guest binary for --agent guest (default: next to this exe).
+        #[arg(long)]
+        guest_bin: Option<PathBuf>,
     },
     /// Negotiate a manifest against the (simulated) host and show what
     /// it resolves to — without running anything.
@@ -204,7 +213,8 @@ fn main() {
             agent,
             model,
             ollama_url,
-        } => cmd_run(&fmt, manifest, audit_out, namespaces_only, offline, agent, model, ollama_url),
+            guest_bin,
+        } => cmd_run(&fmt, manifest, audit_out, namespaces_only, offline, agent, model, ollama_url, guest_bin),
         Cmd::Resolve {
             manifest,
             namespaces_only,
@@ -252,6 +262,7 @@ fn cmd_run(
     agent_backend: AgentBackend,
     model: Option<String>,
     ollama_url: Option<String>,
+    guest_bin: Option<PathBuf>,
 ) -> ExitCode {
     let start = Instant::now();
 
@@ -347,6 +358,12 @@ fn cmd_run(
                 Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
             }
         }
+        AgentBackend::Guest => {
+            match run_guest_subprocess(fmt, manifest.clone(), &env, model, ollama_url, guest_bin) {
+                Ok(r) => r,
+                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+            }
+        }
     };
 
     if let Some(path) = audit_out {
@@ -373,6 +390,88 @@ fn cmd_run(
         fmt,
     );
     ExitCode::Success
+}
+
+/// Spawn `lex-os-guest` as a subprocess and drive the supervisor loop over
+/// its stdin/stdout. This is the macOS development path: same protocol as
+/// the real vsock channel, same guest binary, no Firecracker required.
+///
+/// The guest binary reads its model from `OLLAMA_MODEL` and the Ollama host
+/// from `OLLAMA_HOST`. On macOS it defaults to `localhost:11434`.
+fn run_guest_subprocess(
+    _fmt: &OutputFormat,
+    manifest: Manifest,
+    env: &lex_os_resolver::Environment,
+    model: Option<String>,
+    ollama_url: Option<String>,
+    guest_bin: Option<PathBuf>,
+) -> anyhow::Result<lex_os_supervisor::SessionReport> {
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+    use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
+    #[cfg(feature = "firecracker")]
+    use lex_os_perimeter::FirecrackerPerimeter;
+    #[cfg(not(feature = "firecracker"))]
+    use lex_os_perimeter::SimulatedPerimeter;
+
+    // Locate the guest binary: explicit arg > next to this exe > PATH.
+    let bin = match guest_bin {
+        Some(p) => p,
+        None => {
+            let mut p = std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("lex-os"));
+            p.set_file_name("lex-os-guest");
+            if !p.exists() {
+                PathBuf::from("lex-os-guest") // fall through to PATH
+            } else {
+                p
+            }
+        }
+    };
+
+    // Resolve Ollama host: strip the http(s):// scheme if present, since
+    // the guest prepends its own scheme.
+    let ollama_host = ollama_url
+        .as_deref()
+        .unwrap_or("localhost:11434")
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string();
+    let model_name = model.as_deref().unwrap_or("granite4.1:3b").to_string();
+
+    eprintln!("[supervisor] spawning guest: {}", bin.display());
+    eprintln!("[supervisor] ollama={ollama_host} model={model_name}");
+
+    let mut child = Command::new(&bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit()) // guest's eprintln! goes to our stderr
+        .env("OLLAMA_HOST", &ollama_host)
+        .env("OLLAMA_MODEL", &model_name)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("could not spawn {}: {e}", bin.display()))?;
+
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let transport = StreamTransport::new(BufReader::new(stdout), stdin);
+
+    #[cfg(feature = "firecracker")]
+    let supervisor = Supervisor::new(
+        manifest.clone(), demo::demo_registry(), FirecrackerPerimeter::new(),
+        SystemClock, Limits::default(),
+    );
+    #[cfg(not(feature = "firecracker"))]
+    let supervisor = Supervisor::new(
+        manifest.clone(), demo::demo_registry(), SimulatedPerimeter::new(),
+        SystemClock, Limits::default(),
+    );
+
+    let mut agent = VsockAgent::new(transport, manifest);
+    let report = supervisor.run(env, &mut agent)?;
+
+    // Reap the child process (it should have exited after sending Done).
+    let _ = child.wait();
+    Ok(report)
 }
 
 /// Standalone Wall-2 proof. Provision a real microVM (which installs the

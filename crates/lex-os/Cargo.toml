@@ -27,6 +27,7 @@ lex-os-resolver.workspace = true
 lex-os-supervisor.workspace = true
 lex-os-audit.workspace = true
 lex-os-check.workspace = true
+lex-os-proto.workspace = true
 acli.workspace = true
 clap.workspace = true
 serde.workspace = true
