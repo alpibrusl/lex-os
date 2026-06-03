@@ -45,18 +45,35 @@ fi
 [ -f vmlinux ]     || { echo "+ fetching guest kernel"; curl -fsSL -o vmlinux "$KERNEL_URL"; }
 [ -f rootfs.ext4 ] || { echo "+ fetching guest rootfs"; curl -fsSL -o rootfs.ext4 "$ROOTFS_URL"; }
 
-# 4. Inject the guest-side attack init (attack #2) into the rootfs as
-#    /sbin/init.demo. The perimeter boots it via init=/sbin/init.demo (see
-#    FirecrackerAssets::default in firecracker/mod.rs). Needs root to loop-mount.
+# 4. Build the in-VM agent binary (static musl, with the vsock transport) so
+#    it can be injected into the rootfs. Build as the invoking user — root has
+#    no rustup toolchain. Skipped if the musl target isn't installed.
+REPO_ROOT="$(cd ../.. && pwd)"
+GUEST_BIN="$REPO_ROOT/target/x86_64-unknown-linux-musl/release/lex-os-guest"
+build_as=(cargo)
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  build_as=(sudo -u "$SUDO_USER" -H -- cargo)
+fi
+echo "+ building static musl agent binary (lex-os-guest, --features vsock)"
+( cd "$REPO_ROOT" && "${build_as[@]}" build --release \
+    --target x86_64-unknown-linux-musl -p lex-os-guest --features vsock ) \
+  || echo "! musl build failed (need: rustup target add x86_64-unknown-linux-musl); agent not injected"
+
+# 5. Inject the guest inits + agent binary into the rootfs. Needs root to
+#    loop-mount. /sbin/init.demo = attack-probe demo (init-attack.sh);
+#    /sbin/init.agent = real in-VM agent (init-agent.sh) which execs
+#    /usr/bin/lex-os-guest. The perimeter picks one via the kernel cmdline.
 if [ "$(id -u)" -eq 0 ]; then
-  echo "+ injecting init-attack.sh into the rootfs (/sbin/init.demo)"
+  echo "+ injecting inits + agent binary into the rootfs"
   mnt="$(mktemp -d)"
   mount -o loop rootfs.ext4 "$mnt"
   install -m 0755 ../init-attack.sh "$mnt/sbin/init.demo"
+  install -m 0755 ../init-agent.sh  "$mnt/sbin/init.agent"
+  [ -f "$GUEST_BIN" ] && install -m 0755 "$GUEST_BIN" "$mnt/usr/bin/lex-os-guest"
   umount "$mnt"
   rmdir "$mnt"
 else
-  echo "! skipping rootfs init injection (needs root); re-run with sudo to enable attack #2"
+  echo "! skipping rootfs injection (needs root); re-run with sudo"
 fi
 
 echo "+ assets in $(pwd)"

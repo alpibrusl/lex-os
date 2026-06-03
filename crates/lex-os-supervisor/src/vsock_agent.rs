@@ -97,7 +97,7 @@ fn convert(msg: AgentActionMsg, _parent: &Manifest) -> AgentAction {
 mod tests {
     use super::*;
     use lex_os_proto::transport::{simulated_pair, GuestTransport};
-    use lex_os_proto::{AgentActionMsg, AgentViewMsg};
+    use lex_os_proto::AgentActionMsg;
 
     use lex_os_manifest::{Budget, Goal, Grant, Level};
 

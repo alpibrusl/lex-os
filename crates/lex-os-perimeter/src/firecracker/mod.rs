@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use api::{put_json, wait_for_socket, with_socket};
-use net::{create_tap, destroy_tap, flush_egress_rules, install_egress_allowlist};
+use net::{
+    create_tap, destroy_tap, flush_egress_rules, flush_nat, install_egress_allowlist, install_nat,
+};
 use vm::FirecrackerVm;
 
 use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
@@ -31,6 +33,13 @@ pub struct FirecrackerAssets {
     /// `demo/setup-assets.sh`); a real agent run overrides this via
     /// [`FirecrackerPerimeter::with_assets`].
     pub boot_args: String,
+    /// Host UDS base path for the guest↔supervisor vsock channel. Firecracker
+    /// connects to `${socket_vsock}_${port}` when the guest opens a vsock
+    /// connection. Empty disables the vsock device (the attack-script demo
+    /// doesn't need it; the in-VM agent does).
+    pub socket_vsock: PathBuf,
+    /// Guest context id for the vsock device (host is always CID 2).
+    pub guest_cid: u32,
 }
 
 impl Default for FirecrackerAssets {
@@ -42,6 +51,8 @@ impl Default for FirecrackerAssets {
             tap: "tap-lex0".into(),
             host_ip_cidr: "169.254.42.1/30".into(),
             boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.demo".into(),
+            socket_vsock: PathBuf::from("/tmp/firecracker-lex-os-vsock.sock"),
+            guest_cid: 3,
         }
     }
 }
@@ -159,6 +170,7 @@ impl FirecrackerPerimeter {
         //    would race firecracker for the name and fail with EBUSY.
         create_tap(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
         install_egress_allowlist(&self.assets.tap, &policy.egress).map_err(perimeter_err)?;
+        install_nat(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
 
         // 3. Spawn firecracker; wait for the API socket to accept connections.
         let vm = FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?;
@@ -193,6 +205,20 @@ impl FirecrackerPerimeter {
         })
         .map_err(perimeter_err)?;
 
+        // 6b. Configure the vsock device for the guest↔supervisor channel.
+        //     Skipped when socket_vsock is empty (the attack-script demo has no
+        //     in-guest agent). The host must already be listening on
+        //     `${socket_vsock}_${VSOCK_PORT}` (see lex_os_proto::fc_host).
+        if !self.assets.socket_vsock.as_os_str().is_empty() {
+            let vsock = format!(
+                r#"{{"guest_cid":{},"uds_path":"{}"}}"#,
+                self.assets.guest_cid,
+                self.assets.socket_vsock.display()
+            );
+            with_socket(&self.assets.socket, |s| put_json(s, "/vsock", &vsock))
+                .map_err(perimeter_err)?;
+        }
+
         // 7. Start the VM. Firecracker's /actions is a PUT (it has no POST).
         with_socket(&self.assets.socket, |s| {
             put_json(s, "/actions", r#"{"action_type":"InstanceStart"}"#)
@@ -202,12 +228,18 @@ impl FirecrackerPerimeter {
         Ok(vm)
     }
 
-    /// Remove the host-side footprint: egress rules, tap device, API socket.
-    /// Idempotent — every step ignores "already gone".
+    /// Remove the host-side footprint: egress rules, tap device, API socket,
+    /// and the vsock UDS. Idempotent — every step ignores "already gone".
+    /// (Firecracker binds the vsock `uds_path` itself and does not unlink it on
+    /// exit, so a stale file makes the next `PUT /vsock` fail with EADDRINUSE.)
     fn teardown_host(&self) {
+        flush_nat(&self.assets.tap, &self.assets.host_ip_cidr);
         let _ = flush_egress_rules(&self.assets.tap);
         let _ = destroy_tap(&self.assets.tap);
         let _ = std::fs::remove_file(&self.assets.socket);
+        if !self.assets.socket_vsock.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.assets.socket_vsock);
+        }
     }
 }
 

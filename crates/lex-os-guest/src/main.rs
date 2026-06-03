@@ -45,7 +45,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("[guest] model response: {raw}");
                 parse_action(&raw).unwrap_or_else(|| {
                     eprintln!("[guest] could not parse action; defaulting to fs.read");
-                    AgentActionMsg::Run { command: "fs.read".into() }
+                    AgentActionMsg::Run {
+                        command: "fs.read".into(),
+                    }
                 })
             }
             Err(e) => {
@@ -54,7 +56,10 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
-        let terminal = matches!(action, AgentActionMsg::Done | AgentActionMsg::Destroy { .. });
+        let terminal = matches!(
+            action,
+            AgentActionMsg::Done | AgentActionMsg::Destroy { .. }
+        );
         transport.send_action(&action).context("send action")?;
         if terminal {
             break;
@@ -81,8 +86,8 @@ fn connect_transport() -> anyhow::Result<Box<dyn GuestTransport>> {
     #[allow(unreachable_code)]
     {
         // Stdio shim for local testing.
-        use std::io::BufReader;
         use lex_os_proto::transport::StreamGuestTransport;
+        use std::io::BufReader;
         eprintln!("[guest] no vsock feature — using stdin/stdout");
         let t = StreamGuestTransport::new(BufReader::new(std::io::stdin()), std::io::stdout());
         Ok(Box::new(t))
@@ -134,7 +139,10 @@ Completed: {completed}
 JSON:"#,
         goal = view.goal,
         step = view.step,
-        last = view.last_outcome.as_deref().unwrap_or("none — this is your first step"),
+        last = view
+            .last_outcome
+            .as_deref()
+            .unwrap_or("none — this is your first step"),
         completed = if view.completed.is_empty() {
             "nothing yet".into()
         } else {
@@ -164,7 +172,12 @@ fn call_ollama(host: &str, model: &str, prompt: &str) -> anyhow::Result<String> 
 // ── Action parsing ────────────────────────────────────────────────────────────
 
 const KNOWN_COMMANDS: &[&str] = &[
-    "fs.list", "fs.read", "fs.write", "report.write", "net.fetch", "exec.shell",
+    "fs.list",
+    "fs.read",
+    "fs.write",
+    "report.write",
+    "net.fetch",
+    "exec.shell",
 ];
 
 fn parse_action(response: &str) -> Option<AgentActionMsg> {
@@ -177,7 +190,10 @@ fn parse_action(response: &str) -> Option<AgentActionMsg> {
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
-                if depth == 0 { end = start + i; break; }
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
             }
             _ => {}
         }
@@ -190,17 +206,24 @@ fn parse_action(response: &str) -> Option<AgentActionMsg> {
     // (e.g. {"action":"net.fetch"}) rather than the run wrapper.
     // Accept both forms.
     if KNOWN_COMMANDS.contains(&action) {
-        return Some(AgentActionMsg::Run { command: action.to_string() });
+        return Some(AgentActionMsg::Run {
+            command: action.to_string(),
+        });
     }
 
     match action {
-        "run" => Some(AgentActionMsg::Run { command: v["command"].as_str()?.to_string() }),
+        "run" => Some(AgentActionMsg::Run {
+            command: v["command"].as_str()?.to_string(),
+        }),
         "done" => Some(AgentActionMsg::Done),
         "destroy" => Some(AgentActionMsg::Destroy {
             reason: v["reason"].as_str().unwrap_or("agent decided").to_string(),
         }),
         "propose_child" => Some(AgentActionMsg::ProposeChild {
-            reason: v["reason"].as_str().unwrap_or("need more access").to_string(),
+            reason: v["reason"]
+                .as_str()
+                .unwrap_or("need more access")
+                .to_string(),
         }),
         _ => None,
     }
@@ -218,7 +241,10 @@ mod tests {
 
     #[test]
     fn parses_done() {
-        assert!(matches!(parse_action(r#"{"action":"done"}"#), Some(AgentActionMsg::Done)));
+        assert!(matches!(
+            parse_action(r#"{"action":"done"}"#),
+            Some(AgentActionMsg::Done)
+        ));
     }
 
     #[test]

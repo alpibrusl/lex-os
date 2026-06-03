@@ -28,6 +28,7 @@ use lex_os_manifest::Manifest;
 use lex_os_perimeter::FirecrackerPerimeter;
 #[cfg(not(feature = "firecracker"))]
 use lex_os_perimeter::SimulatedPerimeter;
+#[cfg(not(feature = "firecracker"))]
 use lex_os_proto::transport::StreamTransport;
 use lex_os_resolver::{resolve, Environment};
 use lex_os_supervisor::{Limits, Supervisor, SystemClock};
@@ -214,7 +215,17 @@ fn main() {
             model,
             ollama_url,
             guest_bin,
-        } => cmd_run(&fmt, manifest, audit_out, namespaces_only, offline, agent, model, ollama_url, guest_bin),
+        } => cmd_run(
+            &fmt,
+            manifest,
+            audit_out,
+            namespaces_only,
+            offline,
+            agent,
+            model,
+            ollama_url,
+            guest_bin,
+        ),
         Cmd::Resolve {
             manifest,
             namespaces_only,
@@ -253,6 +264,8 @@ fn environment(namespaces_only: bool, offline: bool) -> Environment {
     env
 }
 
+// Knobs map 1:1 to CLI flags; a struct would just shuffle the names around.
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     fmt: &OutputFormat,
     manifest_path: Option<PathBuf>,
@@ -289,17 +302,34 @@ fn cmd_run(
 
     #[cfg(feature = "firecracker")]
     let make_supervisor = |m: Manifest| {
-        Supervisor::new(m, registry, FirecrackerPerimeter::new(), SystemClock, Limits::default())
+        Supervisor::new(
+            m,
+            registry,
+            FirecrackerPerimeter::new(),
+            SystemClock,
+            Limits::default(),
+        )
     };
     #[cfg(not(feature = "firecracker"))]
     let make_supervisor = |m: Manifest| {
-        Supervisor::new(m, registry, SimulatedPerimeter::new(), SystemClock, Limits::default())
+        Supervisor::new(
+            m,
+            registry,
+            SimulatedPerimeter::new(),
+            SystemClock,
+            Limits::default(),
+        )
     };
 
     // Commands exposed to the LLM agent (names only, for the system prompt).
     let command_names = vec![
-        "fs.list", "fs.read", "fs.write", "report.write",
-        "net.fetch", "exec.shell", "fs.delete_all",
+        "fs.list",
+        "fs.read",
+        "fs.write",
+        "report.write",
+        "net.fetch",
+        "exec.shell",
+        "fs.delete_all",
     ]
     .into_iter()
     .map(|s| s.to_string())
@@ -312,7 +342,9 @@ fn cmd_run(
             let mut ag = demo::DemoAgent::new();
             match supervisor.run(&env, &mut ag) {
                 Ok(r) => r,
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             }
         }
         AgentBackend::Ollama => {
@@ -325,7 +357,9 @@ fn cmd_run(
             let mut ag = agent::LlmAgent::new(provider, command_names, manifest.clone());
             match supervisor.run(&env, &mut ag) {
                 Ok(r) => r,
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             }
         }
         AgentBackend::Anthropic => {
@@ -334,13 +368,17 @@ fn cmd_run(
                     Some(m) => p.with_model(m),
                     None => p,
                 },
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             };
             let supervisor = make_supervisor(manifest.clone());
             let mut ag = agent::LlmAgent::new(provider, command_names, manifest.clone());
             match supervisor.run(&env, &mut ag) {
                 Ok(r) => r,
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             }
         }
         AgentBackend::OpenAi => {
@@ -349,19 +387,36 @@ fn cmd_run(
                     Some(m) => p.with_model(m),
                     None => p,
                 },
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             };
             let supervisor = make_supervisor(manifest.clone());
             let mut ag = agent::LlmAgent::new(provider, command_names, manifest.clone());
             match supervisor.run(&env, &mut ag) {
                 Ok(r) => r,
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             }
         }
         AgentBackend::Guest => {
-            match run_guest_subprocess(fmt, manifest.clone(), &env, model, ollama_url, guest_bin) {
+            // With --features firecracker the guest runs INSIDE the microVM and
+            // talks to the supervisor over vsock; otherwise it's a host
+            // subprocess over stdio (same binary, same protocol).
+            #[cfg(feature = "firecracker")]
+            let res = {
+                let _ = guest_bin; // not used for the in-VM path
+                run_guest_in_vm(fmt, manifest.clone(), &env, model, ollama_url)
+            };
+            #[cfg(not(feature = "firecracker"))]
+            let res =
+                run_guest_subprocess(fmt, manifest.clone(), &env, model, ollama_url, guest_bin);
+            match res {
                 Ok(r) => r,
-                Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string()),
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
             }
         }
     };
@@ -392,9 +447,112 @@ fn cmd_run(
     ExitCode::Success
 }
 
+/// Host transport that accepts the guest's vsock connection lazily, on first
+/// use. The supervisor only connects *after* it has provisioned (booted) the
+/// VM, so we cannot block on `accept()` up front — the guest doesn't exist yet.
+/// The host UDS listener is bound before provisioning (so Firecracker can
+/// connect when the guest boots); the first `send_view`/`recv_action` blocks
+/// until the guest is up.
+#[cfg(feature = "firecracker")]
+struct LazyVsockTransport {
+    host: lex_os_proto::fc_host::FcVsockHost,
+    inner: Option<
+        lex_os_proto::transport::StreamTransport<
+            std::io::BufReader<std::os::unix::net::UnixStream>,
+            std::os::unix::net::UnixStream,
+        >,
+    >,
+}
+
+#[cfg(feature = "firecracker")]
+impl LazyVsockTransport {
+    fn ensure(
+        &mut self,
+    ) -> anyhow::Result<
+        &mut lex_os_proto::transport::StreamTransport<
+            std::io::BufReader<std::os::unix::net::UnixStream>,
+            std::os::unix::net::UnixStream,
+        >,
+    > {
+        if self.inner.is_none() {
+            eprintln!("[supervisor] waiting for the guest to connect over vsock...");
+            self.inner = Some(self.host.accept()?);
+            eprintln!("[supervisor] guest connected over vsock");
+        }
+        Ok(self.inner.as_mut().unwrap())
+    }
+}
+
+#[cfg(feature = "firecracker")]
+impl lex_os_proto::transport::Transport for LazyVsockTransport {
+    fn send_view(&mut self, view: &lex_os_proto::msg::AgentViewMsg) -> anyhow::Result<()> {
+        self.ensure()?.send_view(view)
+    }
+    fn recv_action(&mut self) -> anyhow::Result<lex_os_proto::msg::AgentActionMsg> {
+        self.ensure()?.recv_action()
+    }
+}
+
+/// Boot the agent **inside** a Firecracker microVM and drive the supervisor
+/// loop over vsock. The in-guest `lex-os-guest` does the LLM reasoning (calling
+/// Ollama over the one allowlisted egress target); the supervisor mediates
+/// every action and the host-side walls enforce the grant.
+#[cfg(feature = "firecracker")]
+fn run_guest_in_vm(
+    _fmt: &OutputFormat,
+    manifest: Manifest,
+    env: &lex_os_resolver::Environment,
+    model: Option<String>,
+    ollama_url: Option<String>,
+) -> anyhow::Result<lex_os_supervisor::SessionReport> {
+    use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
+    use lex_os_proto::fc_host::FcVsockHost;
+    use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
+
+    let ollama_host = ollama_url
+        .as_deref()
+        .unwrap_or("192.168.1.165:11434")
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string();
+    let model_name = model
+        .as_deref()
+        .unwrap_or("devstral-small-2:latest")
+        .to_string();
+
+    let assets = FirecrackerAssets {
+        boot_args: format!(
+            "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.agent \
+             ollama_host={ollama_host} ollama_model={model_name}"
+        ),
+        ..FirecrackerAssets::default()
+    };
+
+    eprintln!(
+        "[supervisor] booting microVM; in-guest agent → ollama={ollama_host} model={model_name}"
+    );
+
+    // Bind the host UDS listener BEFORE provisioning so Firecracker can connect
+    // to it when the guest opens its vsock channel during boot.
+    let host = FcVsockHost::bind_default(&assets.socket_vsock)?;
+
+    let supervisor = Supervisor::new(
+        manifest.clone(),
+        demo::demo_registry(),
+        FirecrackerPerimeter::with_assets(assets),
+        SystemClock,
+        Limits::default(),
+    );
+    let transport = LazyVsockTransport { host, inner: None };
+    let mut agent = VsockAgent::new(transport, manifest);
+    let report = supervisor.run(env, &mut agent)?;
+    Ok(report)
+}
+
 /// Spawn `lex-os-guest` as a subprocess and drive the supervisor loop over
-/// its stdin/stdout. This is the macOS development path: same protocol as
-/// the real vsock channel, same guest binary, no Firecracker required.
+/// its stdin/stdout. This is the macOS / no-Firecracker development path: same
+/// protocol as the real vsock channel, same guest binary, no Firecracker.
+#[cfg(not(feature = "firecracker"))]
 ///
 /// The guest binary reads its model from `OLLAMA_MODEL` and the Ollama host
 /// from `OLLAMA_HOST`. On macOS it defaults to `localhost:11434`.
@@ -406,20 +564,19 @@ fn run_guest_subprocess(
     ollama_url: Option<String>,
     guest_bin: Option<PathBuf>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
-    use std::io::BufReader;
-    use std::process::{Command, Stdio};
-    use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
     #[cfg(feature = "firecracker")]
     use lex_os_perimeter::FirecrackerPerimeter;
     #[cfg(not(feature = "firecracker"))]
     use lex_os_perimeter::SimulatedPerimeter;
+    use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
 
     // Locate the guest binary: explicit arg > next to this exe > PATH.
     let bin = match guest_bin {
         Some(p) => p,
         None => {
-            let mut p = std::env::current_exe()
-                .unwrap_or_else(|_| PathBuf::from("lex-os"));
+            let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lex-os"));
             p.set_file_name("lex-os-guest");
             if !p.exists() {
                 PathBuf::from("lex-os-guest") // fall through to PATH
@@ -457,13 +614,19 @@ fn run_guest_subprocess(
 
     #[cfg(feature = "firecracker")]
     let supervisor = Supervisor::new(
-        manifest.clone(), demo::demo_registry(), FirecrackerPerimeter::new(),
-        SystemClock, Limits::default(),
+        manifest.clone(),
+        demo::demo_registry(),
+        FirecrackerPerimeter::new(),
+        SystemClock,
+        Limits::default(),
     );
     #[cfg(not(feature = "firecracker"))]
     let supervisor = Supervisor::new(
-        manifest.clone(), demo::demo_registry(), SimulatedPerimeter::new(),
-        SystemClock, Limits::default(),
+        manifest.clone(),
+        demo::demo_registry(),
+        SimulatedPerimeter::new(),
+        SystemClock,
+        Limits::default(),
     );
 
     let mut agent = VsockAgent::new(transport, manifest);
