@@ -10,7 +10,7 @@ mod vm;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use api::{post_json, put_json, wait_for_socket, with_socket};
+use api::{put_json, wait_for_socket, with_socket};
 use net::{create_tap, destroy_tap, flush_egress_rules, install_egress_allowlist};
 use vm::FirecrackerVm;
 
@@ -193,9 +193,9 @@ impl FirecrackerPerimeter {
         })
         .map_err(perimeter_err)?;
 
-        // 7. Start the VM.
+        // 7. Start the VM. Firecracker's /actions is a PUT (it has no POST).
         with_socket(&self.assets.socket, |s| {
-            post_json(s, "/actions", r#"{"action_type":"InstanceStart"}"#)
+            put_json(s, "/actions", r#"{"action_type":"InstanceStart"}"#)
         })
         .map_err(perimeter_err)?;
 

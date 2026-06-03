@@ -25,11 +25,6 @@ pub(super) fn put_json(stream: impl Write, path: &str, body: &str) -> Result<(),
     request_json(stream, "PUT", path, body)
 }
 
-/// POST a JSON body to `path` on the Firecracker socket.
-pub(super) fn post_json(stream: impl Write, path: &str, body: &str) -> Result<(), ApiError> {
-    request_json(stream, "POST", path, body)
-}
-
 fn request_json(
     mut stream: impl Write,
     method: &str,
