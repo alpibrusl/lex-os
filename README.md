@@ -133,10 +133,10 @@ structurally (design doc §6):
    one bit safer. "What can this box touch, and what's its hard budget"
    is the *entire* safety design.
 2. The chokepoint only holds if the agent genuinely cannot act except
-   through the box's edge. The (real) microVM is what makes that true
-   even when the agent runs arbitrary binaries inside; this MVP ships a
-   **simulated** perimeter for portability and tests, behind the same
-   trait a Firecracker/gVisor/bubblewrap backend implements.
+   through the box's edge. A real **Firecracker microVM** backend now
+   ships (requires KVM; see `demo/agent.sh`) — kernel-level egress wall
+   included. The simulated perimeter remains for portability and tests,
+   behind the same trait.
 3. You can replay effects deterministically; you cannot necessarily
    replay the agent's reasoning. The audit log records observable
    decisions, not the agent's thoughts.
