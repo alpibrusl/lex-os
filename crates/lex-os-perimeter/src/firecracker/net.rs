@@ -76,21 +76,45 @@ pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(
     Ok(())
 }
 
-/// Remove every FORWARD rule scoped to `tap`. Idempotent: ignores misses.
+/// Remove only the FORWARD rules this backend added (scoped to `tap`).
+/// Reads the live chain and deletes our rules one by one. It deliberately
+/// does NOT flush the chain: the host may carry Docker / libvirt / VPN rules
+/// on FORWARD that must survive a box teardown. Idempotent: ignores misses.
 pub(super) fn flush_egress_rules(tap: &str) -> Result<(), NetError> {
-    // `-D` removes the first matching rule; loop until iptables says no.
-    loop {
-        let status = Command::new("iptables")
-            .args(["-D", "FORWARD", "-i", tap, "-j", "DROP"])
-            .output()
-            .map_err(|_| NetError::MissingTool { cmd: "iptables" })?;
-        if !status.status.success() {
-            break;
-        }
+    let listing = Command::new("iptables")
+        .args(["-S", "FORWARD"])
+        .output()
+        .map_err(|_| NetError::MissingTool { cmd: "iptables" })?;
+    if !listing.status.success() {
+        // Can't enumerate — bail rather than risk a blunt flush.
+        return Ok(());
     }
-    // For the demo we flush the whole FORWARD chain on teardown.
-    let _ = run("iptables", &["-F", "FORWARD"]);
+    let text = String::from_utf8_lossy(&listing.stdout);
+    for args in scoped_delete_args(&text, tap) {
+        let _ = run("iptables", &as_str_slice(&args));
+    }
     Ok(())
+}
+
+/// Given `iptables -S FORWARD` output, build the argv for each `-D` that
+/// removes a rule scoped to `tap` — and only those. Every other rule
+/// (Docker, libvirt, VPN) is left untouched. Each result is the args that
+/// follow `iptables`.
+pub(super) fn scoped_delete_args(forward_listing: &str, tap: &str) -> Vec<Vec<String>> {
+    let needle = format!("-i {tap} ");
+    forward_listing
+        .lines()
+        .filter(|l| l.starts_with("-A ") && l.contains(&needle))
+        .map(|l| {
+            let mut args = vec!["-D".to_string()];
+            args.extend(
+                l.trim_start_matches("-A ")
+                    .split_whitespace()
+                    .map(String::from),
+            );
+            args
+        })
+        .collect()
 }
 
 /// Remove the tap interface.
@@ -153,6 +177,46 @@ mod tests {
     fn build_iptables_drop_catchall_is_appended_last() {
         let argv = build_iptables_drop_rule("tap-lex0");
         assert_eq!(argv, vec!["-A", "FORWARD", "-i", "tap-lex0", "-j", "DROP"]);
+    }
+
+    #[test]
+    fn scoped_delete_removes_only_our_tap_rules_not_docker_or_vpn() {
+        // A realistic FORWARD chain with Docker, libvirt and our two rules.
+        let listing = "\
+-P FORWARD DROP
+-A FORWARD -j DOCKER-USER
+-A FORWARD -i docker0 -o eth0 -j ACCEPT
+-A FORWARD -i tap-lex0 -d 169.254.42.1/32 -p tcp -m tcp --dport 443 -j ACCEPT
+-A FORWARD -i virbr0 -j ACCEPT
+-A FORWARD -i tap-lex0 -j DROP";
+        let dels = scoped_delete_args(listing, "tap-lex0");
+        // Exactly our two rules, transformed -A -> -D; nothing else.
+        assert_eq!(dels.len(), 2);
+        assert_eq!(
+            dels[0],
+            vec![
+                "-D",
+                "FORWARD",
+                "-i",
+                "tap-lex0",
+                "-d",
+                "169.254.42.1/32",
+                "-p",
+                "tcp",
+                "-m",
+                "tcp",
+                "--dport",
+                "443",
+                "-j",
+                "ACCEPT"
+            ]
+        );
+        assert_eq!(
+            dels[1],
+            vec!["-D", "FORWARD", "-i", "tap-lex0", "-j", "DROP"]
+        );
+        // Sanity: a different tap name matches none of these.
+        assert!(scoped_delete_args(listing, "tap-other").is_empty());
     }
 
     #[test]
