@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed: lex-os ships a binary, so a fresh clone should build
+# the exact same dependency versions (incl. the pinned lex-lang/acli git revs).
 .DS_Store
 /tmp
 *.audit.json
