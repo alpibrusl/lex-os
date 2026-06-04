@@ -40,11 +40,11 @@ lex-os-proto = { path = "crates/lex-os-proto", version = "0.1.0" }
 #
 # The trust lattice that drives both the static type check and the supervisor's
 # derived sandbox lives in lex-lang's lex-types crate.
-lex-types = { git = "https://github.com/alpibrusl/lex-lang", rev = "c67730d242858b29213b39a276672e0d6ba475ee" }
+lex-types = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725681208a865489e82b061777bc60d" }
 # The parse → canonicalize → type-check pipeline for the static grant↔effect
 # wall (the agent's code is checked before it runs).
-lex-syntax = { git = "https://github.com/alpibrusl/lex-lang", rev = "c67730d242858b29213b39a276672e0d6ba475ee" }
-lex-ast = { git = "https://github.com/alpibrusl/lex-lang", rev = "c67730d242858b29213b39a276672e0d6ba475ee" }
+lex-syntax = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725681208a865489e82b061777bc60d" }
+lex-ast = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725681208a865489e82b061777bc60d" }
 # acli (Agent-friendly CLI) standard — the binary speaks it so an agent can
 # discover lex-os the same way it discovers any other tool.
 acli = { git = "https://github.com/alpibrusl/acli", tag = "v0.5.0" }
