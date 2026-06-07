@@ -1,0 +1,193 @@
+# lex-os CLI reference (generated from `--help`; do not edit by hand)
+# Regenerate: UPDATE_CLI_REF=1 cargo test -p lex-os --test cli_contract
+
+===== lex-os =====
+Autonomous-agent runtime: a sealed box plus a goal, supervised from outside.
+
+Usage: lex-os [OPTIONS] <COMMAND>
+
+Commands:
+  run         Dispatch an agent against a manifest and run the mediation loop to a terminal outcome
+  resolve     Negotiate a manifest against the (simulated) host and show what it resolves to — without running anything
+  manifest    Manifest utilities
+  audit       Audit-log utilities
+  check       Type-check an agent Lex program against a manifest grant and refuse it if its effects exceed the grant — the type-check wall (demo Attempt 1), run *before* the program executes
+  introspect  Emit the acli command tree for agent discovery
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+  -V, --version          Print version
+
+===== lex-os run =====
+Dispatch an agent against a manifest and run the mediation loop to a terminal outcome
+
+Usage: lex-os run [OPTIONS]
+
+Options:
+      --manifest <MANIFEST>
+          Path to a manifest JSON file. Omit to use the built-in demo
+
+      --output <OUTPUT>
+          Output format (text for humans, json for agents)
+          
+          [default: text]
+          [possible values: text, json]
+
+      --audit-out <AUDIT_OUT>
+          Write the resulting tamper-proof audit log here
+
+      --namespaces-only
+          Pretend the host can only do namespace isolation
+
+      --offline
+          Pretend the host has no outbound network
+
+      --agent <AGENT>
+          LLM backend to use as the agent brain (default: demo)
+
+          Possible values:
+          - demo:      Scripted deterministic demo agent (no model required)
+          - ollama:    Local Ollama model (default: mistral). No egress needed
+          - anthropic: Anthropic Claude (ANTHROPIC_API_KEY env var required)
+          - open-ai:   OpenAI-compatible endpoint (OPENAI_API_KEY env var required)
+          - guest:     Spawn lex-os-guest as a subprocess (stdio transport). The guest binary calls Ollama itself. Use this on macOS for a full end-to-end test without Firecracker; on Linux with --features firecracker the guest runs inside the microVM over vsock instead
+          
+          [default: demo]
+
+      --model <MODEL>
+          Model name for the selected backend (e.g. "mistral", "qwen2.5-coder")
+
+      --ollama-url <OLLAMA_URL>
+          Ollama base URL (default: http://localhost:11434)
+
+      --guest-bin <GUEST_BIN>
+          Path to lex-os-guest binary for --agent guest (default: next to this exe)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+===== lex-os resolve =====
+Negotiate a manifest against the (simulated) host and show what it resolves to — without running anything
+
+Usage: lex-os resolve [OPTIONS]
+
+Options:
+      --manifest <MANIFEST>  
+      --output <OUTPUT>      Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --namespaces-only      
+      --offline              
+  -h, --help                 Print help
+
+===== lex-os manifest =====
+Manifest utilities
+
+Usage: lex-os manifest [OPTIONS] <COMMAND>
+
+Commands:
+  sample  Print the built-in demo manifest as JSON
+  hash    Print the content-address (hash) of a manifest
+  narrow  Validate that a child manifest only *narrows* a parent (grant, egress allowlist, and budgets). Rejects any widening — the narrowing-invariant wall (demo Attempt 3)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os manifest sample =====
+Print the built-in demo manifest as JSON
+
+Usage: lex-os manifest sample [OPTIONS]
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os manifest hash =====
+Print the content-address (hash) of a manifest
+
+Usage: lex-os manifest hash [OPTIONS] --manifest <MANIFEST>
+
+Options:
+      --manifest <MANIFEST>  
+      --output <OUTPUT>      Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help                 Print help
+
+===== lex-os manifest narrow =====
+Validate that a child manifest only *narrows* a parent (grant, egress allowlist, and budgets). Rejects any widening — the narrowing-invariant wall (demo Attempt 3)
+
+Usage: lex-os manifest narrow [OPTIONS] --parent <PARENT> --child <CHILD>
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --parent <PARENT>  
+      --child <CHILD>    
+  -h, --help             Print help
+
+===== lex-os audit =====
+Audit-log utilities
+
+Usage: lex-os audit [OPTIONS] <COMMAND>
+
+Commands:
+  verify  Verify the hash chain of an audit log file
+  render  Render an audit log as newline-delimited JSON (one entry per line) for a live, tailable external view
+  tail    Follow an audit log file, printing new entries as they arrive (one NDJSON line per entry). Runs indefinitely; press Ctrl-C to stop
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os audit verify =====
+Verify the hash chain of an audit log file
+
+Usage: lex-os audit verify [OPTIONS] --log <LOG>
+
+Options:
+      --log <LOG>        
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os audit render =====
+Render an audit log as newline-delimited JSON (one entry per line) for a live, tailable external view
+
+Usage: lex-os audit render [OPTIONS] --log <LOG>
+
+Options:
+      --log <LOG>        
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os audit tail =====
+Follow an audit log file, printing new entries as they arrive (one NDJSON line per entry). Runs indefinitely; press Ctrl-C to stop
+
+Usage: lex-os audit tail [OPTIONS] --log <LOG>
+
+Options:
+      --log <LOG>        
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os check =====
+Type-check an agent Lex program against a manifest grant and refuse it if its effects exceed the grant — the type-check wall (demo Attempt 1), run *before* the program executes
+
+Usage: lex-os check [OPTIONS] --grant <GRANT> <PROGRAM>
+
+Arguments:
+  <PROGRAM>  The agent `.lex` program to check
+
+Options:
+      --grant <GRANT>    Manifest JSON whose grant + egress the program is checked against
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os introspect =====
+Emit the acli command tree for agent discovery
+
+Usage: lex-os introspect [OPTIONS]
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
