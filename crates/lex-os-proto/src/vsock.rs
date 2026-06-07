@@ -21,6 +21,24 @@ pub fn guest_connect() -> anyhow::Result<StreamGuestTransport<BufReader<File>, F
     connect_retry(HOST_CID, VSOCK_PORT, Duration::from_secs(15))
 }
 
+/// Clear `O_NONBLOCK` on stdin/stdout/stderr. Firecracker exposes the guest
+/// serial console as a *non-blocking* fd; a burst of logging then makes
+/// `write(2)` return `EAGAIN`, which Rust's `print!`/`eprintln!` turn into a
+/// hard panic ("failed printing to stderr: Resource temporarily unavailable").
+/// Making the console block (the host drains ttyS0 via inherited stdio) keeps
+/// guest logging reliable. Best-effort: failures are ignored.
+pub fn make_stdio_blocking() {
+    for fd in 0..=2 {
+        // SAFETY: F_GETFL/F_SETFL on the standard fds; no memory is touched.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
+    }
+}
+
 fn connect_retry(
     cid: u32,
     port: u32,

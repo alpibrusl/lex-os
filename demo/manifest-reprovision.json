@@ -1,0 +1,19 @@
+{
+  "_comment_reprovision_manifest": [
+    "Manifest for the vsock re-attach demo (issue #27, Task 2). The in-VM agent",
+    "runs a deterministic, model-free script (LEX_OS_GUEST_SCRIPT=reprovision-demo):",
+    "read a file, deliberately dispose the box mid-task, then — on the rebuilt box",
+    "the supervisor re-attaches to over vsock — write the report and finish.",
+    "No model is involved, so network is None and the egress allowlist is empty:",
+    "the demo proves reprovision + vsock re-attach with zero external dependencies.",
+    "filesystem is ReadWrite for the read + report work; exec stays None."
+  ],
+  "goal": {
+    "description": "Read a file, then (after the box is disposed and rebuilt) write report.md to prove the supervisor re-attached to the fresh guest over vsock.",
+    "done_signal": "REPORT_WRITTEN"
+  },
+  "grant": { "filesystem": "ReadWrite", "network": "None", "exec": "None" },
+  "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 100, "max_api_calls": 50 },
+  "isolation_floor": "MicroVm",
+  "egress": []
+}

@@ -18,3 +18,8 @@ lex-os-resolver.workspace = true
 lex-os-audit.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Test doubles implement `lex_os_proto::transport::Transport`, whose methods
+# return `anyhow::Result`.
+anyhow.workspace = true

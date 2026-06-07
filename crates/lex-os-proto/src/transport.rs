@@ -17,6 +17,14 @@ pub trait Transport: Send {
     fn send_view(&mut self, view: &AgentViewMsg) -> anyhow::Result<()>;
     /// Block until the guest sends back an action (one JSON line).
     fn recv_action(&mut self) -> anyhow::Result<AgentActionMsg>;
+
+    /// Re-establish the channel after the box was rebuilt (the old guest is
+    /// gone). For a vsock host transport this drops the dead stream so the next
+    /// send/recv re-`accept()`s the fresh guest. Default: no-op — in-process and
+    /// subprocess transports outlive a reprovision and have nothing to redo.
+    fn reconnect(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Guest-side mirror: receive a view, send an action.
@@ -159,6 +167,7 @@ mod tests {
             step: 0,
             last_outcome: None,
             completed: vec![],
+            reprovisions: 0,
         };
         host.send_view(&view).unwrap();
 
@@ -183,6 +192,7 @@ mod tests {
             step: 1,
             last_outcome: None,
             completed: vec![],
+            reprovisions: 0,
         };
         host.send_view(&view).unwrap();
         guest.recv_view().unwrap();
@@ -200,6 +210,7 @@ mod tests {
             step: 5,
             last_outcome: Some("ok".into()),
             completed: vec!["fs.list".into()],
+            reprovisions: 0,
         };
         let mut buf = Vec::new();
         {

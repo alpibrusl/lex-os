@@ -27,13 +27,26 @@ const DEFAULT_OLLAMA_HOST: &str = "10.0.2.2:11434";
 const DEFAULT_MODEL: &str = "mistral";
 
 fn main() -> anyhow::Result<()> {
+    // Firecracker's serial console is a non-blocking fd; without this, a burst
+    // of logging panics the guest with EAGAIN on stderr. Must run before any
+    // print. No-op off the real VM (no vsock feature / non-Linux).
+    #[cfg(all(feature = "vsock", target_os = "linux"))]
+    lex_os_proto::vsock::make_stdio_blocking();
+
     let ollama_host = env::var("OLLAMA_HOST").unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.into());
     let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+    // A deterministic, LLM-free script for hardware demos (e.g. proving vsock
+    // re-attach across a reprovision without depending on a model's whims).
+    let script = env::var("LEX_OS_GUEST_SCRIPT").unwrap_or_default();
 
-    eprintln!("[guest] starting; ollama={ollama_host} model={model}");
+    eprintln!("[guest] starting; ollama={ollama_host} model={model} script={script:?}");
 
     let mut transport = connect_transport()?;
     eprintln!("[guest] transport connected");
+
+    if script == "reprovision-demo" {
+        return run_reprovision_demo(transport.as_mut());
+    }
 
     // Give up after this many consecutive denied/blocked outcomes. A real model
     // may keep hammering a wall (devstral does); the agent must recognise it's
@@ -91,6 +104,60 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("[guest] loop complete");
     Ok(())
+}
+
+// ── Deterministic reprovision demo (model-free) ─────────────────────────────────
+
+/// A deterministic, model-free agent used to prove vsock re-attach across a
+/// reprovision on real hardware. It drives purely off the supervisor's view —
+/// no network, so it needs no Ollama host: do one read, dispose the box once
+/// mid-task, then (on the rebuilt box) write the report and finish.
+fn run_reprovision_demo(transport: &mut dyn GuestTransport) -> anyhow::Result<()> {
+    loop {
+        let view = transport.recv_view().context("recv view")?;
+        let action = scripted_action(&view);
+        eprintln!(
+            "[guest] reprovision-demo step={} reprovisions={} completed={:?} -> {action:?}",
+            view.step, view.reprovisions, view.completed,
+        );
+        let terminal = matches!(
+            action,
+            AgentActionMsg::Done | AgentActionMsg::Destroy { .. }
+        );
+        transport.send_action(&action).context("send action")?;
+        if terminal {
+            break;
+        }
+    }
+    eprintln!("[guest] reprovision-demo loop complete");
+    Ok(())
+}
+
+/// The demo's decision function. Keyed on the externally-restored `completed`
+/// list and the `reprovisions` count, so a fresh guest process on a rebuilt box
+/// resumes correctly and disposes the box exactly once.
+fn scripted_action(view: &AgentViewMsg) -> AgentActionMsg {
+    let done = |c: &str| view.completed.iter().any(|x| x == c);
+    if !done("fs.read") {
+        AgentActionMsg::Run {
+            command: "fs.read".into(),
+        }
+    } else if !done("report.write") {
+        if view.reprovisions == 0 {
+            // Dispose the box mid-task — exactly once — to force a reprovision.
+            AgentActionMsg::Destroy {
+                reason: "reprovision demo: dispose the box mid-task".into(),
+            }
+        } else {
+            // On the rebuilt box the supervisor must have re-attached its vsock
+            // channel for us to get here; finish the work it resumed.
+            AgentActionMsg::Run {
+                command: "report.write".into(),
+            }
+        }
+    } else {
+        AgentActionMsg::Done
+    }
 }
 
 // ── Transport selection ───────────────────────────────────────────────────────
@@ -279,5 +346,49 @@ mod tests {
     #[test]
     fn returns_none_for_garbage() {
         assert!(parse_action("I have no idea").is_none());
+    }
+
+    fn view(completed: &[&str], reprovisions: u32) -> AgentViewMsg {
+        AgentViewMsg {
+            goal: "demo".into(),
+            step: 0,
+            last_outcome: None,
+            completed: completed.iter().map(|s| s.to_string()).collect(),
+            reprovisions,
+        }
+    }
+
+    #[test]
+    fn demo_reads_first() {
+        assert!(matches!(
+            scripted_action(&view(&[], 0)),
+            AgentActionMsg::Run { command } if command == "fs.read"
+        ));
+    }
+
+    #[test]
+    fn demo_disposes_box_once_after_first_read() {
+        assert!(matches!(
+            scripted_action(&view(&["fs.read"], 0)),
+            AgentActionMsg::Destroy { .. }
+        ));
+    }
+
+    #[test]
+    fn demo_resumes_with_report_on_rebuilt_box() {
+        // After the reprovision the guest must NOT dispose the box again —
+        // it writes the report instead, keyed on the bumped reprovisions count.
+        assert!(matches!(
+            scripted_action(&view(&["fs.read"], 1)),
+            AgentActionMsg::Run { command } if command == "report.write"
+        ));
+    }
+
+    #[test]
+    fn demo_done_after_report() {
+        assert!(matches!(
+            scripted_action(&view(&["fs.read", "report.write"], 1)),
+            AgentActionMsg::Done
+        ));
     }
 }

@@ -37,7 +37,11 @@ pub struct VsockAgent<T: Transport> {
 
 impl<T: Transport> VsockAgent<T> {
     pub fn new(transport: T, parent: Manifest) -> Self {
-        Self { transport, parent, send_failures: 0 }
+        Self {
+            transport,
+            parent,
+            send_failures: 0,
+        }
     }
 }
 
@@ -53,6 +57,7 @@ impl<T: Transport> Agent for VsockAgent<T> {
             step: view.step,
             last_outcome: view.last_outcome.clone(),
             completed: view.completed.to_vec(),
+            reprovisions: view.reprovisions,
         };
 
         if let Err(e) = self.transport.send_view(&msg) {
@@ -72,6 +77,16 @@ impl<T: Transport> Agent for VsockAgent<T> {
                 convert(action, &self.parent)
             }
         }
+    }
+
+    fn on_reprovision(&mut self) {
+        // The old guest is gone with the old box; re-attach the channel so the
+        // next `next_action` reaches the freshly booted guest, and clear the
+        // failure latch so the deaths of the previous box don't count against it.
+        if let Err(e) = self.transport.reconnect() {
+            eprintln!("[vsock-agent] reconnect after reprovision failed: {e}");
+        }
+        self.send_failures = 0;
     }
 }
 
@@ -115,7 +130,31 @@ mod tests {
             step,
             last_outcome: None,
             completed: &[],
+            reprovisions: 0,
         }
+    }
+
+    #[test]
+    fn forwards_reprovisions_count_to_guest() {
+        let (host_transport, mut guest) = simulated_pair();
+        let mut agent = VsockAgent::new(host_transport, parent());
+
+        let handle = std::thread::spawn(move || {
+            let view = guest.recv_view().unwrap();
+            // The guest must learn how many times its box was rebuilt.
+            assert_eq!(view.reprovisions, 2);
+            guest.send_action(&AgentActionMsg::Done).unwrap();
+        });
+
+        let view = AgentView {
+            goal: "test goal",
+            step: 5,
+            last_outcome: None,
+            completed: &[],
+            reprovisions: 2,
+        };
+        let _ = agent.next_action(&view);
+        handle.join().unwrap();
     }
 
     #[test]
@@ -127,7 +166,11 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let view = guest.recv_view().unwrap();
             assert_eq!(view.step, 0);
-            guest.send_action(&AgentActionMsg::Run { command: "fs.read".into() }).unwrap();
+            guest
+                .send_action(&AgentActionMsg::Run {
+                    command: "fs.read".into(),
+                })
+                .unwrap();
         });
 
         let view = make_view(0);
@@ -168,6 +211,65 @@ mod tests {
         let action = agent.next_action(&make_view(2));
         handle.join().unwrap();
         assert!(matches!(action, AgentAction::ProposeChild(_)));
+    }
+
+    #[test]
+    fn on_reprovision_reconnects_and_clears_failure_count() {
+        use lex_os_proto::transport::Transport;
+        use std::sync::{Arc, Mutex};
+
+        // A transport whose guest has died (sends fail) until it is reconnected.
+        struct Flaky {
+            fail: Arc<Mutex<bool>>,
+            reconnects: Arc<Mutex<u32>>,
+        }
+        impl Transport for Flaky {
+            fn send_view(&mut self, _v: &AgentViewMsg) -> anyhow::Result<()> {
+                if *self.fail.lock().unwrap() {
+                    anyhow::bail!("dead guest")
+                } else {
+                    Ok(())
+                }
+            }
+            fn recv_action(&mut self) -> anyhow::Result<AgentActionMsg> {
+                Ok(AgentActionMsg::Run {
+                    command: "fs.read".into(),
+                })
+            }
+            fn reconnect(&mut self) -> anyhow::Result<()> {
+                *self.reconnects.lock().unwrap() += 1;
+                *self.fail.lock().unwrap() = false; // the rebuilt guest is reachable
+                Ok(())
+            }
+        }
+
+        let fail = Arc::new(Mutex::new(true));
+        let reconnects = Arc::new(Mutex::new(0));
+        let t = Flaky {
+            fail: fail.clone(),
+            reconnects: reconnects.clone(),
+        };
+        let mut agent = VsockAgent::new(t, parent());
+
+        // The dead guest makes sends fail; the agent gives up (Done) and latches
+        // its failure count at the ceiling.
+        for _ in 0..4 {
+            assert!(matches!(
+                agent.next_action(&make_view(0)),
+                AgentAction::Done
+            ));
+        }
+
+        // Reprovision: the supervisor tells the agent to re-attach its channel.
+        agent.on_reprovision();
+        assert_eq!(*reconnects.lock().unwrap(), 1);
+
+        // The latch is cleared and the channel works, so the agent talks to the
+        // rebuilt guest again instead of short-circuiting to Done.
+        assert!(matches!(
+            agent.next_action(&make_view(0)),
+            AgentAction::Run(c) if c == "fs.read"
+        ));
     }
 
     #[test]
