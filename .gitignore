@@ -10,3 +10,6 @@
 demo/agent-audit.json
 demo/reprovision-audit.json
 demo/reprovision-run.json
+demo/egress-console.log
+demo/egress-stub-443.log
+demo/egress-stub-8080.log

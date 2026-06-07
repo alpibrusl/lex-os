@@ -43,6 +43,59 @@ pub(super) fn build_iptables_drop_rule(tap: &str) -> Vec<String> {
     ]
 }
 
+/// Build an INPUT-chain ACCEPT for an allowlisted host:port. Traffic the box
+/// sends to a *host-local* address (e.g. the tap-gateway results-stub) is
+/// delivered locally via INPUT, not FORWARD, so the grant's allowlist must be
+/// mirrored here for those targets to be reachable.
+pub(super) fn build_iptables_input_accept_rule(tap: &str, host: &str, port: u16) -> Vec<String> {
+    vec![
+        "-A".into(),
+        "INPUT".into(),
+        "-i".into(),
+        tap.into(),
+        "-d".into(),
+        host.into(),
+        "-p".into(),
+        "tcp".into(),
+        "--dport".into(),
+        port.to_string(),
+        "-j".into(),
+        "ACCEPT".into(),
+    ]
+}
+
+/// Accept replies on flows the box already opened to an allowlisted host-local
+/// target (conntrack ESTABLISHED,RELATED), so multi-packet exchanges complete.
+pub(super) fn build_iptables_input_established_rule(tap: &str) -> Vec<String> {
+    vec![
+        "-A".into(),
+        "INPUT".into(),
+        "-i".into(),
+        tap.into(),
+        "-m".into(),
+        "conntrack".into(),
+        "--ctstate".into(),
+        "ESTABLISHED,RELATED".into(),
+        "-j".into(),
+        "ACCEPT".into(),
+    ]
+}
+
+/// Catch-all DROP for box→host-local traffic not explicitly allowlisted. This is
+/// the leg that closes the single-tenant hole: without it the box could reach
+/// *any* service on the host (ssh, metadata, other tenants) via INPUT, since
+/// only FORWARD was fenced.
+pub(super) fn build_iptables_input_drop_rule(tap: &str) -> Vec<String> {
+    vec![
+        "-A".into(),
+        "INPUT".into(),
+        "-i".into(),
+        tap.into(),
+        "-j".into(),
+        "DROP".into(),
+    ]
+}
+
 /// Split "host" or "host:port" with a 443 default.
 pub(super) fn parse_host_port(entry: &str) -> Result<(String, u16), NetError> {
     if let Some((host, port)) = entry.split_once(':') {
@@ -95,9 +148,17 @@ pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(
         match resolve_host(&host, port) {
             Some(ip) => {
                 let ip = ip.to_string();
+                // Allow the target on BOTH chains: FORWARD covers external /
+                // routed destinations, INPUT covers host-local ones (the
+                // tap-gateway results-stub). The grant is the single source for
+                // both — no chain knows anything the manifest didn't grant.
                 run(
                     "iptables",
                     &as_str_slice(&build_iptables_accept_rule(tap, &ip, port)),
+                )?;
+                run(
+                    "iptables",
+                    &as_str_slice(&build_iptables_input_accept_rule(tap, &ip, port)),
                 )?;
             }
             None => {
@@ -108,7 +169,19 @@ pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(
             }
         }
     }
+    // Fail-closed catch-alls on BOTH chains. FORWARD fences routed egress; INPUT
+    // fences box→host-local egress (closing the single-tenant hole where the box
+    // could otherwise reach arbitrary services on the host). The INPUT
+    // ESTABLISHED,RELATED accept lets allowed flows complete.
+    run(
+        "iptables",
+        &as_str_slice(&build_iptables_input_established_rule(tap)),
+    )?;
     run("iptables", &as_str_slice(&build_iptables_drop_rule(tap)))?;
+    run(
+        "iptables",
+        &as_str_slice(&build_iptables_input_drop_rule(tap)),
+    )?;
     Ok(())
 }
 
@@ -204,17 +277,22 @@ fn resolve_host(host: &str, port: u16) -> Option<std::net::IpAddr> {
 /// does NOT flush the chain: the host may carry Docker / libvirt / VPN rules
 /// on FORWARD that must survive a box teardown. Idempotent: ignores misses.
 pub(super) fn flush_egress_rules(tap: &str) -> Result<(), NetError> {
-    let listing = Command::new("iptables")
-        .args(["-S", "FORWARD"])
-        .output()
-        .map_err(|_| NetError::MissingTool { cmd: "iptables" })?;
-    if !listing.status.success() {
-        // Can't enumerate — bail rather than risk a blunt flush.
-        return Ok(());
-    }
-    let text = String::from_utf8_lossy(&listing.stdout);
-    for args in scoped_delete_args(&text, tap) {
-        let _ = run("iptables", &as_str_slice(&args));
+    // Both chains carry our `-i tap` rules now (FORWARD for routed egress, INPUT
+    // for host-local). scoped_delete_args keeps the chain name from each line, so
+    // the same helper cleans either listing.
+    for chain in ["FORWARD", "INPUT"] {
+        let listing = Command::new("iptables")
+            .args(["-S", chain])
+            .output()
+            .map_err(|_| NetError::MissingTool { cmd: "iptables" })?;
+        if !listing.status.success() {
+            // Can't enumerate — skip this chain rather than risk a blunt flush.
+            continue;
+        }
+        let text = String::from_utf8_lossy(&listing.stdout);
+        for args in scoped_delete_args(&text, tap) {
+            let _ = run("iptables", &as_str_slice(&args));
+        }
     }
     Ok(())
 }
@@ -300,6 +378,67 @@ mod tests {
     fn build_iptables_drop_catchall_is_appended_last() {
         let argv = build_iptables_drop_rule("tap-lex0");
         assert_eq!(argv, vec!["-A", "FORWARD", "-i", "tap-lex0", "-j", "DROP"]);
+    }
+
+    #[test]
+    fn input_accept_mirrors_the_allowlist_on_the_input_chain() {
+        // Host-local targets (the tap-gateway results-stub) arrive via INPUT, so
+        // the same grant entry must produce an INPUT ACCEPT, not only FORWARD.
+        let argv = build_iptables_input_accept_rule("tap-lex0", "169.254.42.1", 443);
+        assert_eq!(
+            argv,
+            vec![
+                "-A", "INPUT", "-i", "tap-lex0", "-d", "169.254.42.1", "-p", "tcp", "--dport",
+                "443", "-j", "ACCEPT"
+            ]
+        );
+    }
+
+    #[test]
+    fn input_drop_catchall_closes_the_host_local_hole() {
+        // Without this, the box could reach any host-local service via INPUT.
+        let argv = build_iptables_input_drop_rule("tap-lex0");
+        assert_eq!(argv, vec!["-A", "INPUT", "-i", "tap-lex0", "-j", "DROP"]);
+    }
+
+    #[test]
+    fn input_established_accept_lets_allowed_flows_complete() {
+        let argv = build_iptables_input_established_rule("tap-lex0");
+        assert_eq!(
+            argv,
+            vec![
+                "-A",
+                "INPUT",
+                "-i",
+                "tap-lex0",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "ESTABLISHED,RELATED",
+                "-j",
+                "ACCEPT"
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_delete_cleans_our_input_rules_too() {
+        // The INPUT chain also carries host-local accept/established/drop rules;
+        // teardown must remove exactly ours (keeping any host INPUT policy).
+        let listing = "\
+-P INPUT ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -i tap-lex0 -d 169.254.42.1/32 -p tcp -m tcp --dport 443 -j ACCEPT
+-A INPUT -i tap-lex0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -i tap-lex0 -j DROP
+-A INPUT -p tcp --dport 22 -j ACCEPT
+";
+        let dels = scoped_delete_args(listing, "tap-lex0");
+        assert_eq!(dels.len(), 3, "exactly our three tap INPUT rules");
+        assert!(dels.iter().all(|d| d[0] == "-D" && d[1] == "INPUT"));
+        // The host's lo and ssh rules are untouched.
+        assert!(dels.iter().all(|d| !d.contains(&"lo".to_string())));
+        assert!(dels.iter().all(|d| !d.contains(&"22".to_string())));
     }
 
     #[test]

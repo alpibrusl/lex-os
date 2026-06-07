@@ -1,0 +1,22 @@
+{
+  "_comment_egress_manifest": [
+    "Manifest for the egress ALLOWED-leg + host-local fencing demo (issue #27,",
+    "Task 4). The one allowed target is the tap gateway 169.254.42.1:443 — the",
+    "host as the guest sees it across the tap, where demo/egress.sh runs a",
+    "results-stub. Using the gateway IP (not a fake hostname) means the host",
+    "resolves it and the allowlist is driven purely by the grant: the perimeter",
+    "installs the matching INPUT ACCEPT, and the box reaches the stub *only*",
+    "because the grant lists it. A second host-local service on :8080 is NOT in",
+    "the grant, so the INPUT catch-all DROP blocks it — proving the box can't",
+    "reach arbitrary host-local services (the single-tenant hole this closes).",
+    "fs is ReadOnly; exec None."
+  ],
+  "goal": {
+    "description": "Reach the one allowlisted host-local target and confirm everything else — external hosts and non-allowlisted host-local services — is dropped at the host tap.",
+    "done_signal": "EGRESS_PROBED"
+  },
+  "grant": { "filesystem": "ReadOnly", "network": "Allowlist", "exec": "None" },
+  "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 100, "max_api_calls": 50 },
+  "isolation_floor": "MicroVm",
+  "egress": ["169.254.42.1:443"]
+}
