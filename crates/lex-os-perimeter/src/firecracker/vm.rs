@@ -25,20 +25,34 @@ pub(super) struct FirecrackerVm {
 }
 
 impl FirecrackerVm {
+    /// Spawn firecracker directly (unjailed, as the current user — root in the
+    /// demos). `sock` is both what we pass `--api-sock` and where the host
+    /// connects.
     pub(super) fn spawn(sock: PathBuf) -> Result<Self, VmError> {
-        if Command::new("firecracker")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        let argv = build_firecracker_argv(&sock);
+        Self::spawn_program("firecracker", argv, sock)
+    }
+
+    /// Spawn via an arbitrary launcher (the jailer) with a pre-built argv.
+    /// `host_sock` is where the *host* reaches the API socket (under the jail
+    /// chroot it differs from the in-jail `--api-sock` path inside `argv`).
+    pub(super) fn spawn_jailed(
+        jailer_bin: &str,
+        argv: Vec<String>,
+        host_sock: PathBuf,
+    ) -> Result<Self, VmError> {
+        Self::spawn_program(jailer_bin, argv, host_sock)
+    }
+
+    fn spawn_program(program: &str, argv: Vec<String>, sock: PathBuf) -> Result<Self, VmError> {
+        if Command::new(program).arg("--version").output().is_err() {
             return Err(VmError::MissingBinary);
         }
-        let argv = build_firecracker_argv(&sock);
         // Inherit stdout/stderr so the guest serial console (ttyS0 → firecracker
         // stdout) streams live to the operator — that's where the Wall-2 egress
         // probes from init-attack.sh appear. (Folding the console into the audit
         // log is a follow-up; for now it must at least be visible.)
-        let child = Command::new("firecracker")
+        let child = Command::new(program)
             .args(&argv)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

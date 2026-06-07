@@ -24,6 +24,12 @@ MODEL="${MODEL:-devstral-small-2:latest}"
 #   sudo bash demo/agent.sh demo/manifest-agent-none.json
 MANIFEST="${1:-${MANIFEST:-demo/manifest-agent.json}}"
 
+# Jail firecracker: drop to the invoking user's uid and the kvm group so the
+# chrooted, non-root VMM can still open /dev/kvm. Override via env if needed.
+JAIL_UID="${JAIL_UID:-${SUDO_UID:-$(id -u)}}"
+JAIL_GID="${JAIL_GID:-$(getent group kvm | cut -d: -f3)}"
+[ -n "$JAIL_GID" ] || { echo "agent: no kvm group on this host; set JAIL_GID" >&2; exit 1; }
+
 # Build as the invoking user (root has no rustup toolchain); run as root.
 CARGO=(cargo)
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
@@ -41,8 +47,9 @@ echo "+ build lex-os (--features firecracker)"
 echo "+ build + inject the in-VM agent binary into the rootfs"
 bash demo/setup-assets.sh >/dev/null
 
-echo "+ booting in-VM agent (manifest=$MANIFEST ollama=$OLLAMA model=$MODEL)"
+echo "+ booting JAILED in-VM agent (manifest=$MANIFEST ollama=$OLLAMA model=$MODEL jail uid=$JAIL_UID gid=$JAIL_GID)"
 # The manifest's egress allowlists the Ollama host as the box's ONE egress target.
 # If you override OLLAMA, update the manifest's egress to match.
 "$LEXOS" run --agent guest --manifest "$MANIFEST" \
+  --jail-uid "$JAIL_UID" --jail-gid "$JAIL_GID" \
   --ollama-url "http://$OLLAMA" --model "$MODEL" --audit-out demo/agent-audit.json

@@ -68,6 +68,22 @@ Options:
       --guest-script <GUEST_SCRIPT>
           Deterministic in-guest script for --agent guest (e.g. "reprovision-demo"), in place of the LLM loop. Used by demos that need a fixed sequence
 
+      --jail-uid <JAIL_UID>
+          uid firecracker is dropped to under the jailer (e.g. the invoking user)
+
+      --jail-gid <JAIL_GID>
+          gid firecracker runs as — use the `kvm` group so /dev/kvm is reachable
+
+      --jail-base <JAIL_BASE>
+          Base directory for the per-VM chroot
+          
+          [default: /srv/jailer]
+
+      --jail-id <JAIL_ID>
+          Per-VM jail id (chroot + cgroup name); kept stable across reprovisions
+          
+          [default: lex-os]
+
   -h, --help
           Print help (see a summary with '-h')
 

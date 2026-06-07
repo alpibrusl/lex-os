@@ -11,14 +11,11 @@
 //! host-visible location under the jail root. [`Layout`] (in the parent module)
 //! holds both halves; this module owns the jailer-specific path math and argv.
 
-// Wired into boot_microvm incrementally; allow until the layout lands.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 /// How to launch firecracker under the jailer.
 #[derive(Debug, Clone)]
-pub(super) struct JailConfig {
+pub struct JailConfig {
     /// Non-root uid firecracker is dropped to.
     pub uid: u32,
     /// Group firecracker runs as — must be the `kvm` group so `/dev/kvm`
@@ -26,20 +23,33 @@ pub(super) struct JailConfig {
     pub gid: u32,
     /// Directory under which jailer builds `firecracker/<id>/root/`.
     pub chroot_base: PathBuf,
-    /// Per-VM identifier; also the chroot subdirectory name.
+    /// Per-VM identifier; also the chroot subdirectory name. Kept stable across
+    /// reprovisions so the host vsock path doesn't move under the supervisor.
     pub id: String,
     /// The jailer binary (on PATH or an absolute path).
     pub jailer_bin: String,
+}
+
+/// The per-VM jail directory jailer owns: `<base>/firecracker/<id>`. Removing
+/// this tree on teardown clears the chroot, the staged assets, and the sockets.
+pub(super) fn chroot_id_dir(cfg: &JailConfig) -> PathBuf {
+    cfg.chroot_base.join("firecracker").join(&cfg.id)
 }
 
 /// The chroot root jailer builds for this VM: `<base>/firecracker/<id>/root`.
 /// Everything firecracker references by an in-jail absolute path resolves to
 /// this directory on the host.
 pub(super) fn chroot_root(cfg: &JailConfig) -> PathBuf {
-    cfg.chroot_base
+    chroot_id_dir(cfg).join("root")
+}
+
+/// Best-effort guess of the cgroup-v2 directory jailer creates for this VM
+/// (`<cgroup2-mount>/<exec-file-name>/<id>`). Removed on teardown so a
+/// reprovision with the same id doesn't trip over a leftover cgroup.
+pub(super) fn cgroup_v2_dir(cfg: &JailConfig) -> PathBuf {
+    PathBuf::from("/sys/fs/cgroup")
         .join("firecracker")
         .join(&cfg.id)
-        .join("root")
 }
 
 /// Build the jailer argv. Everything after `--` is firecracker's own args;

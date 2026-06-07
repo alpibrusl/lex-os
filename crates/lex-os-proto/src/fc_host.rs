@@ -28,6 +28,12 @@ impl FcVsockHost {
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)
             .map_err(|e| anyhow::anyhow!("bind {}: {e}", path.display()))?;
+        // The host stays root, but under the jailer firecracker connects as a
+        // dropped uid:gid — connecting to a Unix socket needs write permission
+        // on the socket file, so make it world-rw. (Harmless unjailed, where the
+        // peer is root.) Best-effort: a perms failure here isn't fatal.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
         Ok(Self { listener, path })
     }
 

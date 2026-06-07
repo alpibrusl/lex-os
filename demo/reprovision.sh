@@ -24,6 +24,12 @@ cd "$REPO_ROOT"
 MANIFEST="${1:-demo/manifest-reprovision.json}"
 AUDIT_OUT="demo/reprovision-audit.json"
 
+# Jail firecracker: drop to the invoking user's uid and the kvm group (so the
+# chrooted, non-root VMM can still open /dev/kvm). Override via env if needed.
+JAIL_UID="${JAIL_UID:-${SUDO_UID:-$(id -u)}}"
+JAIL_GID="${JAIL_GID:-$(getent group kvm | cut -d: -f3)}"
+[ -n "$JAIL_GID" ] || { echo "reprovision: no kvm group on this host; set JAIL_GID" >&2; exit 1; }
+
 # Build as the invoking user (root has no rustup toolchain); run as root.
 CARGO=(cargo)
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
@@ -41,11 +47,12 @@ echo "+ build lex-os (--features firecracker)"
 echo "+ build + inject the in-VM agent binary into the rootfs"
 bash demo/setup-assets.sh >/dev/null
 
-echo "+ booting in-VM agent with the deterministic reprovision script (manifest=$MANIFEST)"
+echo "+ booting JAILED in-VM agent with the reprovision script (manifest=$MANIFEST, jail uid=$JAIL_UID gid=$JAIL_GID)"
 # NB: don't capture the run's stdout — Firecracker's guest serial console is on
 # inherited stdio and interleaves with the JSON envelope. Assert against the
 # clean --audit-out file (written directly by lex-os) and `lex-os audit verify`.
 "$LEXOS" run --agent guest --guest-script reprovision-demo \
+  --jail-uid "$JAIL_UID" --jail-gid "$JAIL_GID" \
   --manifest "$MANIFEST" --audit-out "$AUDIT_OUT"
 
 echo
