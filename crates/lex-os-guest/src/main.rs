@@ -27,6 +27,12 @@ const DEFAULT_OLLAMA_HOST: &str = "10.0.2.2:11434";
 const DEFAULT_MODEL: &str = "mistral";
 
 fn main() -> anyhow::Result<()> {
+    // Firecracker's serial console is a non-blocking fd; without this, a burst
+    // of logging panics the guest with EAGAIN on stderr. Must run before any
+    // print. No-op off the real VM (no vsock feature / non-Linux).
+    #[cfg(all(feature = "vsock", target_os = "linux"))]
+    lex_os_proto::vsock::make_stdio_blocking();
+
     let ollama_host = env::var("OLLAMA_HOST").unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.into());
     let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
     // A deterministic, LLM-free script for hardware demos (e.g. proving vsock
