@@ -42,54 +42,53 @@ echo "+ build + inject the in-VM agent binary into the rootfs"
 bash demo/setup-assets.sh >/dev/null
 
 echo "+ booting in-VM agent with the deterministic reprovision script (manifest=$MANIFEST)"
+# NB: don't capture the run's stdout — Firecracker's guest serial console is on
+# inherited stdio and interleaves with the JSON envelope. Assert against the
+# clean --audit-out file (written directly by lex-os) and `lex-os audit verify`.
 "$LEXOS" run --agent guest --guest-script reprovision-demo \
-  --manifest "$MANIFEST" --audit-out "$AUDIT_OUT" --output json | tee demo/reprovision-run.json
+  --manifest "$MANIFEST" --audit-out "$AUDIT_OUT"
 
 echo
+echo "+ verifying the audit hash chain"
+if "$LEXOS" audit verify --log "$AUDIT_OUT" >/dev/null 2>&1; then
+  chain_ok=1; else chain_ok=0; fi
+
 echo "+ asserting the run reprovisioned the box and still reached the goal"
-python3 - "$AUDIT_OUT" demo/reprovision-run.json <<'PY'
-import json, sys
-audit_path, run_path = sys.argv[1], sys.argv[2]
-run = json.load(open(run_path))
-data = run.get("data", run)
+CHAIN_OK="$chain_ok" python3 - "$AUDIT_OUT" <<'PY'
+import json, os, sys
+audit_path = sys.argv[1]
 
-outcome = data.get("outcome", "")
-reprovisions = data.get("reprovisions", 0)
-verified = data.get("audit_verified", False)
-commands_used = data.get("commands_used", 0)
-
-# The audit-out file is a JSON array of chained entries; each event is tagged
-# {"kind":"provisioned", ..., "reprovision": true|false}.
-audit = json.load(open(audit_path))
-entries = audit if isinstance(audit, list) else audit.get("entries", [])
+# The audit-out file is a clean JSON array of chained entries; each event is
+# tagged {"kind": "...", ...}. Everything we assert is derived from it.
+entries = json.load(open(audit_path))
 def ev(e): return e.get("event", e)
-provisioned = [e for e in entries if ev(e).get("kind") == "provisioned"]
+def kind(e): return ev(e).get("kind")
+
+provisioned        = [e for e in entries if kind(e) == "provisioned"]
 reprovision_events = [e for e in provisioned if ev(e).get("reprovision") is True]
-# report.write is the SECOND command and only happens on the rebuilt box. Its
-# presence in the log is the proof the supervisor re-attached to the new guest
-# over vsock and the agent resumed real work — not merely that it gave up.
-report_written = any(
-    ev(e).get("kind") == "command_allowed" and ev(e).get("command") == "report.write"
-    for e in entries
-)
+allowed            = [e for e in entries if kind(e) == "command_allowed"]
+report_written     = any(ev(e).get("command") == "report.write" for e in allowed)
+read_done          = any(ev(e).get("command") == "fs.read" for e in allowed)
+goal_met           = any(kind(e) == "session_ended" and "goal_met" in str(ev(e).get("outcome", ""))
+                         for e in entries)
+chain_ok           = os.environ.get("CHAIN_OK") == "1"
 
 ok = True
 def check(name, cond, got):
     global ok
-    mark = "PASS" if cond else "FAIL"
     if not cond: ok = False
-    print(f"  [{mark}] {name}: {got}")
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name}: {got}")
 
-check("outcome == GoalMet", outcome == "GoalMet", outcome)
-check("reprovisions >= 1", reprovisions >= 1, reprovisions)
-check("audit chain verified", verified is True, verified)
-check("audit has a reprovision Provisioned event", len(reprovision_events) >= 1,
+check("audit hash chain verified", chain_ok, chain_ok)
+check("session reached goal_met", goal_met, goal_met)
+check("box was reprovisioned at least once", len(reprovision_events) >= 1,
       f"{len(reprovision_events)} reprovision event(s), {len(provisioned)} total provisions")
-# These two are the discriminating checks: without a working vsock re-attach the
-# rebuilt guest never connects, so report.write never runs and commands_used==1
-# (the supervisor would otherwise read the agent's give-up as a hollow GoalMet).
+# The discriminating checks: without a working vsock re-attach the rebuilt guest
+# never connects, so report.write never runs (a hollow give-up GoalMet would
+# show fs.read only).
+check("fs.read ran on the first box", read_done, read_done)
 check("report.write ran AFTER the reprovision", report_written, report_written)
-check("commands_used >= 2 (fs.read + report.write)", commands_used >= 2, commands_used)
+check("two commands allowed (fs.read + report.write)", len(allowed) >= 2, len(allowed))
 
 print()
 if ok:
