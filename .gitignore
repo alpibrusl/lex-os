@@ -8,3 +8,5 @@
 /demo/audit.json
 /demo/stub.log
 demo/agent-audit.json
+demo/reprovision-audit.json
+demo/reprovision-run.json
