@@ -12,10 +12,12 @@ cannot reach. The closest existing analogues are CI runners and
 microVM-isolated code sandboxes; this generalizes that into a
 first-class, goal-driven runtime.
 
-This repository implements the MVP from the design doc: **one agent that
-can only act through mediated, policy-checked, logged commands, with a
-hard budget and an isolation floor, that can trash its own box and be
-reprovisioned from outside.**
+This repository is an **honest proof-of-concept** of that design: one
+agent that can only act through mediated, policy-checked, logged
+commands, with a hard budget and an isolation floor, that can trash its
+own box and be reprovisioned from outside. It ships both an in-process
+*simulated* perimeter (runs anywhere, for tests and demos) and a real
+**Firecracker microVM** backend (behind a Cargo feature; needs KVM).
 
 ## The one rule
 
@@ -30,8 +32,9 @@ Two boundaries, kept strictly separate:
   and isolated, so interior freedom costs nothing.
 - **The box's edge — minimal, hard-enforced capability.** Because no
   human is watching, the perimeter is the only thing catching
-  consequential mistakes. It is enforced at the kernel/VM level, derived
-  from one declaration: the trust grant.
+  consequential mistakes. With the Firecracker backend it is enforced at
+  the kernel/VM level. Everything it enforces derives from one
+  declaration: the trust grant.
 
 ## Architecture
 
@@ -62,14 +65,16 @@ Two boundaries, kept strictly separate:
 
 | Crate | Role |
 | --- | --- |
-| [`lex-os-manifest`](crates/lex-os-manifest) | The trust manifest: goal + capability **grant** + **budget** + isolation floor. Content-addressable. Re-exports the trust lattice from `lex-types`. |
-| [`lex-os-audit`](crates/lex-os-audit) | Tamper-evident, **hash-chained** external audit log. An agent editing its own logs is designed out. |
-| [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: derives an OS **sandbox policy** from the grant; pluggable isolation backends. |
-| [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied. |
-| [`lex-os-supervisor`](crates/lex-os-supervisor) | The mediated command loop: capability + reversibility + **budget** gates, liveness, and **reprovision-on-death**. |
-| [`lex-os-proto`](crates/lex-os-proto) | Wire protocol between the supervisor (host) and the agent running inside the microVM — vsock transport (`AF_VSOCK` guest side, Unix-socket host side). |
+| [`lex-os-manifest`](crates/lex-os-manifest) | The trust manifest: goal + capability **grant** + **budget** (integer cents) + reversibility + isolation floor. Content-addressable. Re-exports the trust lattice from `lex-types`. |
+| [`lex-os-audit`](crates/lex-os-audit) | Tamper-evident, **hash-chained** external audit log. An agent editing its own logs is designed out — append-only, no edit/truncate API. |
+| [`lex-os-check`](crates/lex-os-check) | The **type-check wall**: runs an agent's `.lex` program through the real Lex front-end (`lex-syntax` → `lex-ast` → `lex-types`) and refuses it if its declared effects exceed the grant — *before* it runs. Backs the `check` command. |
+| [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: `SandboxPolicy::from_grant` is the single grant→OS-policy mapping. Pluggable isolation backends behind the `Perimeter` trait — a portable simulated one and a real Firecracker microVM (feature `firecracker`). |
+| [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied — every failure mode is an error, never a silent weakening. |
+| [`lex-os-supervisor`](crates/lex-os-supervisor) | The mediated command loop: capability + reversibility + **budget** gates, liveness, and **reprovision-on-death**. Also home to the scripted demo agent. |
+| [`lex-os-proto`](crates/lex-os-proto) | Wire protocol between the supervisor (host) and the agent running inside the microVM — vsock transport (`AF_VSOCK` guest side, Unix-socket host side; feature-gated). |
 | [`lex-os-guest`](crates/lex-os-guest) | The agent binary that runs **inside** the box: drives an LLM reasoning loop and relays each action to the supervisor for mediation. |
 | [`lex-os`](crates/lex-os) | The CLI, speaking the [acli](https://github.com/alpibrusl/acli) protocol so agents can discover and drive it. |
+| [`results-stub`](crates/results-stub) | A tiny HTTPS server used by the live demos as the *one* allowlisted egress target, so the egress wall has something legitimate to let through. |
 | [`manifests/`](manifests) | The manifest format and bounded commands as a **Lex package**. |
 
 ### Dependency graph
@@ -82,35 +87,76 @@ lex-lang          (Rust — language; + the trust-lattice feature in lex-types)
 acli              (CLI standard)
 ```
 
-The arrow points one way only. The trust lattice that drives **both** the
-static Lex type check **and** the supervisor's derived sandbox lives in
-`lex-lang`'s `lex-types` crate (`lex_types::trust`) — one declaration,
-two enforcement layers.
+The arrow points one way only. `lex-os` pins `lex-types`, `lex-syntax`
+and `lex-ast` as git dependencies of `lex-lang`. The trust lattice that
+drives **both** the static Lex type check **and** the supervisor's
+derived sandbox lives in `lex-lang`'s `lex-types` crate
+(`lex_types::trust`) — one declaration, two enforcement layers.
 
 ## Try it
+
+The demo runs in-process against the *simulated* perimeter, so it works
+anywhere `cargo` does — no KVM, no root, no network:
 
 ```sh
 cargo run -p lex-os -- run                       # run the built-in demo
 cargo run -p lex-os -- --output json run         # agent-friendly output
 cargo run -p lex-os -- resolve                   # what does the manifest resolve to?
 cargo run -p lex-os -- manifest sample > m.json  # emit a sample manifest
+cargo run -p lex-os -- manifest hash --manifest m.json   # its content-address
 cargo run -p lex-os -- run --manifest m.json --audit-out audit.json
-cargo run -p lex-os -- audit verify --log audit.json
+cargo run -p lex-os -- audit verify --log audit.json     # check the hash chain
+cargo run -p lex-os -- audit render --log audit.json     # NDJSON view
 cargo run -p lex-os -- introspect                # acli command tree
 ```
 
 The demo agent reads files, **deliberately destroys its own box**
 mid-task, and is transparently reprovisioned by the supervisor from the
 manifest + last checkpoint. It then reaches for `net.fetch`, `exec.shell`
-and `fs.delete_all` — all refused, because the demo grant is
-filesystem-only and the consequential command has no approval path. The
-session ends `GoalMet`, and the audit log is hash-verified.
+and `fs.delete_all`, and tries to *widen* its own grant — all refused,
+each by a different gate (see "The three walls" below). The session ends
+`GoalMet`, and the audit log is hash-verified.
+
+### The three walls
+
+Each refusal in the demo is a distinct mechanism, not one catch-all:
+
+```sh
+# 1. Type-check wall — refuse a program whose effects exceed the grant,
+#    before it runs. Needs the grant manifest and the .lex program:
+cargo run -p lex-os -- check --grant examples/analyze.json \
+  examples/agent-programs/submit_report.lex     # exit 8 if it over-reaches
+
+# 2. Narrowing wall — a child manifest may only narrow a parent's grant,
+#    egress and budgets; any widening is rejected:
+cargo run -p lex-os -- manifest narrow --parent parent.json --child child.json
+
+# 3. Perimeter / budget walls — enforced live inside the mediation loop:
+#    net.fetch and exec.shell are denied at the perimeter (network: none),
+#    fs.delete_all is refused by construction (irreversible-consequential).
+```
+
+The mediation loop logs every request **before** deciding it. The gate
+order is load-bearing: log → reversibility → perimeter → budget → charge
+→ allow.
+
+### Driving a real LLM (simulated perimeter)
+
+The agent brain is pluggable. Beyond the scripted `demo` agent, `run`
+takes `--agent {ollama,anthropic,openai,guest}`:
+
+```sh
+cargo run -p lex-os -- run --agent ollama --model mistral
+cargo run -p lex-os -- run --agent anthropic --model claude-...   # ANTHROPIC_API_KEY
+cargo run -p lex-os -- run --agent guest                          # spawn lex-os-guest over stdio
+```
 
 ### On a real microVM (KVM host + root)
 
 The commands above use the in-process *simulated* perimeter, which runs
-anywhere but is **not** a security boundary. On a Linux host with `/dev/kvm`
-the same loop runs behind a real Firecracker microVM:
+anywhere but is **not** a security boundary. On a Linux host with
+`/dev/kvm`, build with `--features firecracker` and the same loop runs
+behind a real Firecracker microVM with a host-side egress wall:
 
 ```sh
 sudo bash demo/setup-assets.sh    # fetch firecracker + kernel + rootfs (one-time)
@@ -120,15 +166,19 @@ sudo bash demo/agent.sh           # a real LLM agent running INSIDE the microVM 
 sudo bash demo/agent.sh demo/manifest-agent-none.json   # same, with network denied by the grant
 ```
 
+`cargo run -p lex-os --features firecracker -- box-smoke` is the
+standalone Wall-2 proof: it boots a microVM with the egress wall, streams
+the guest console while it runs its egress probes, then tears it down.
+
 ## What the demo proves today
 
 Run on a KVM host (a laptop with `/dev/kvm`), with the agent's model served
 locally by [Ollama] on the LAN:
 
 - **A real LLM agent runs *inside* a Firecracker microVM.** `lex-os-guest`
-  boots in the VM, reasons with a local model (e.g. `devstral-small-2`), and
-  relays every proposed action to the supervisor over vsock. The model is
-  reached over the **one** egress target the grant allows — nothing else.
+  boots in the VM, reasons with a local model, and relays every proposed
+  action to the supervisor over vsock. The model is reached over the
+  **one** egress target the grant allows — nothing else.
 - **The three walls hold against that live agent**, each at a different layer:
   - **type-check wall** — a program whose effects exceed the grant is refused
     *before it runs* (`lex-os check`, exit 8);
@@ -155,15 +205,18 @@ not a hardened product.
 ```sh
 # A sudo + open-internet manifest needs a microVM. On a namespace-only
 # host the resolver refuses rather than running on a weaker boundary:
-cargo run -p lex-os -- resolve --manifest sudo.json --namespaces-only
+cargo run -p lex-os -- resolve --manifest examples/sudo-dangerous.json --namespaces-only
 #   error: needs isolation floor `microvm` but host tops out at
 #   `namespace` — refusing to downgrade   (exit code 8)
 ```
 
+`run` and `resolve` both take `--namespaces-only` and `--offline` to
+simulate a weaker host and drive this path.
+
 ## The reversibility classification
 
-Every command is sorted by blast radius and the class is enforced
-structurally (design doc §6):
+Every command is classified by blast radius (`Reversibility` in
+`lex-os-manifest`), and the class is enforced structurally:
 
 - **Reversible / cheap** (read, query, draft) → free, logged.
 - **Irreversible but bounded** (send email, write file, spend ≤ €X) →
@@ -171,7 +224,8 @@ structurally (design doc §6):
 - **Irreversible and consequential** (delete data, large payment) → in a
   no-human system there is no approval step, so these must be **absent
   from the grant** or **bounded so tightly the worst case is
-  acceptable.** The supervisor refuses to run one.
+  acceptable.** The supervisor refuses to run one *by construction* —
+  denied even under a maximal grant.
 
 ## Honest cautions
 
@@ -179,10 +233,11 @@ structurally (design doc §6):
    one bit safer. "What can this box touch, and what's its hard budget"
    is the *entire* safety design.
 2. The chokepoint only holds if the agent genuinely cannot act except
-   through the box's edge. A real **Firecracker microVM** backend now
-   ships (requires KVM; see `demo/agent.sh`) — kernel-level egress wall
-   included. The simulated perimeter remains for portability and tests,
-   behind the same trait.
+   through the box's edge. A real **Firecracker microVM** backend ships
+   behind the `firecracker` feature (requires KVM; see `demo/agent.sh`)
+   — kernel-level egress wall included. The simulated perimeter remains
+   the default for portability and tests, behind the same trait, and is
+   **not** a security boundary.
 3. You can replay effects deterministically; you cannot necessarily
    replay the agent's reasoning. The audit log records observable
    decisions, not the agent's thoughts.
