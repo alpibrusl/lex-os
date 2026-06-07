@@ -35,6 +35,35 @@ use lex_os_supervisor::{Limits, Supervisor, SystemClock};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Which perimeter backend this binary was built with, and whether it is a
+/// *real* security boundary. The selection is compile-time (the
+/// `firecracker` feature), but the runtime must never let the simulated
+/// perimeter be mistaken for the real one — so every `run` surfaces this
+/// in its output and warns loudly when the box is not actually sealed.
+#[cfg(feature = "firecracker")]
+const PERIMETER_BACKEND: &str = "firecracker";
+#[cfg(feature = "firecracker")]
+const PERIMETER_IS_SECURITY_BOUNDARY: bool = true;
+#[cfg(not(feature = "firecracker"))]
+const PERIMETER_BACKEND: &str = "simulated";
+#[cfg(not(feature = "firecracker"))]
+const PERIMETER_IS_SECURITY_BOUNDARY: bool = false;
+
+/// Print a prominent warning to stderr when the run is *not* sealed by a
+/// real boundary. Goes to stderr so it never corrupts `--output json` on
+/// stdout. Returning the boundary status keeps callers honest about it.
+fn warn_if_not_sealed() {
+    if !PERIMETER_IS_SECURITY_BOUNDARY {
+        eprintln!(
+            "⚠  SIMULATED PERIMETER — this is NOT a security boundary. The box is \
+             enforced in-process for portability and tests; an agent that ignores \
+             Lex is not actually contained. Build with `--features firecracker` on \
+             a KVM host for a real microVM boundary. (every run reports \
+             `security_boundary` in its output.)"
+        );
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "lex-os",
@@ -279,6 +308,11 @@ fn cmd_run(
 ) -> ExitCode {
     let start = Instant::now();
 
+    // Before anything runs, make the boundary unmistakable: if this isn't a
+    // real perimeter, say so loudly. The "sealed at the edge" promise is void
+    // under the simulator, and a silent simulator is the dangerous failure.
+    warn_if_not_sealed();
+
     // For LLM agents use a goal that motivates the three attacks naturally;
     // the scripted demo keeps its own manifest.
     let manifest = match (&manifest_path, &agent_backend) {
@@ -431,6 +465,10 @@ fn cmd_run(
         "manifest_id": manifest.content_id().0,
         "goal": manifest.goal.description,
         "grant": manifest.grant.pretty(),
+        // The boundary the run was actually enforced behind. `false` means
+        // the simulated perimeter — useful output, never a security claim.
+        "perimeter": PERIMETER_BACKEND,
+        "security_boundary": PERIMETER_IS_SECURITY_BOUNDARY,
         "outcome": format!("{:?}", report.outcome),
         "reprovisions": report.reprovisions,
         "commands_used": report.ledger.commands_used(),

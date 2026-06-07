@@ -1,0 +1,29 @@
+name: firecracker (KVM)
+
+# The real perimeter — the part that makes "sealed at the edge" true rather
+# than simulated — can only be exercised on a host with /dev/kvm and root.
+# This job therefore runs ONLY on a self-hosted runner labelled `kvm`, and
+# only when invoked manually (or on the nightly cron). It never runs on the
+# default GitHub-hosted infra, so it can't redden a normal PR; it is the gate
+# that must go green before the Firecracker backend can become the default
+# (lex-os#23).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * *"
+
+jobs:
+  wall:
+    # Requires a self-hosted runner with KVM + root + the firecracker assets.
+    runs-on: [self-hosted, kvm]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build with the real perimeter
+        run: cargo build -p lex-os --features firecracker
+      - name: Fetch microVM assets (firecracker + kernel + rootfs)
+        run: sudo bash demo/setup-assets.sh
+      - name: Wall 2 — kernel egress wall drops a non-allowlisted host
+        # Boots a real Firecracker microVM and asserts traffic to 8.8.8.8 is
+        # dropped at the host tap while the one allowlisted host is reachable.
+        run: sudo bash demo/wall2.sh

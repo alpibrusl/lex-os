@@ -237,7 +237,10 @@ Every command is classified by blast radius (`Reversibility` in
    behind the `firecracker` feature (requires KVM; see `demo/agent.sh`)
    — kernel-level egress wall included. The simulated perimeter remains
    the default for portability and tests, behind the same trait, and is
-   **not** a security boundary.
+   **not** a security boundary. So it can never be mistaken for one,
+   every `run` reports which perimeter enforced it — `security_boundary:
+   false` and a loud stderr warning under the simulator, `true` only on
+   the real microVM build.
 3. You can replay effects deterministically; you cannot necessarily
    replay the agent's reasoning. The audit log records observable
    decisions, not the agent's thoughts.
