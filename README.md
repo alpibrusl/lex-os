@@ -164,6 +164,7 @@ sudo bash demo/run.sh             # supervisor lifecycle: provision → destroy 
 sudo bash demo/wall2.sh           # kernel egress wall: curl 8.8.8.8 blocked from inside the box
 sudo bash demo/agent.sh           # a real LLM agent running INSIDE the microVM (local Ollama)
 sudo bash demo/agent.sh demo/manifest-agent-none.json   # same, with network denied by the grant
+sudo bash demo/reprovision.sh     # in-VM agent disposes its box mid-task; supervisor rebuilds it and re-attaches over vsock
 ```
 
 `cargo run -p lex-os --features firecracker -- box-smoke` is the
@@ -190,13 +191,17 @@ locally by [Ollama] on the LAN:
   **denied at mediation**, while it can still reach its model (kernel egress
   allowlist) — one manifest expressing both. It gives up after repeated
   refusals; the supervisor caps total steps regardless.
+- **Reprovision-on-death re-attaches the in-VM agent.** When the box dies
+  mid-task, the supervisor rebuilds a fresh microVM, re-`accept()`s its vsock
+  channel to the new guest, and the agent resumes where it left off — proven by
+  `demo/reprovision.sh` (the rebuilt box completes `report.write`, not just a
+  hollow give-up).
 - Every step lands in the **hash-chained audit log**, verified after the run.
 
 What this is *not* yet: the perimeter is single-tenant and runs as root (no
-jailer); reprovision-on-death doesn't yet re-attach the in-VM agent's vsock;
-the model is reached over the LAN rather than served in-box. It's an honest
-proof-of-concept of the design, demonstrated end-to-end on real hardware —
-not a hardened product.
+jailer); the model is reached over the LAN rather than served in-box. It's an
+honest proof-of-concept of the design, demonstrated end-to-end on real
+hardware — not a hardened product.
 
 [Ollama]: https://ollama.com
 
