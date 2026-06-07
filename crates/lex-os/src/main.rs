@@ -142,6 +142,10 @@ enum Cmd {
         /// Path to lex-os-guest binary for --agent guest (default: next to this exe).
         #[arg(long)]
         guest_bin: Option<PathBuf>,
+        /// Deterministic in-guest script for --agent guest (e.g. "reprovision-demo"),
+        /// in place of the LLM loop. Used by demos that need a fixed sequence.
+        #[arg(long)]
+        guest_script: Option<String>,
     },
     /// Negotiate a manifest against the (simulated) host and show what
     /// it resolves to — without running anything.
@@ -244,6 +248,7 @@ fn main() {
             model,
             ollama_url,
             guest_bin,
+            guest_script,
         } => cmd_run(
             &fmt,
             manifest,
@@ -254,6 +259,7 @@ fn main() {
             model,
             ollama_url,
             guest_bin,
+            guest_script,
         ),
         Cmd::Resolve {
             manifest,
@@ -305,6 +311,7 @@ fn cmd_run(
     model: Option<String>,
     ollama_url: Option<String>,
     guest_bin: Option<PathBuf>,
+    guest_script: Option<String>,
 ) -> ExitCode {
     let start = Instant::now();
 
@@ -441,11 +448,18 @@ fn cmd_run(
             #[cfg(feature = "firecracker")]
             let res = {
                 let _ = guest_bin; // not used for the in-VM path
-                run_guest_in_vm(fmt, manifest.clone(), &env, model, ollama_url)
+                run_guest_in_vm(fmt, manifest.clone(), &env, model, ollama_url, guest_script)
             };
             #[cfg(not(feature = "firecracker"))]
-            let res =
-                run_guest_subprocess(fmt, manifest.clone(), &env, model, ollama_url, guest_bin);
+            let res = run_guest_subprocess(
+                fmt,
+                manifest.clone(),
+                &env,
+                model,
+                ollama_url,
+                guest_bin,
+                guest_script,
+            );
             match res {
                 Ok(r) => r,
                 Err(e) => {
@@ -529,6 +543,14 @@ impl lex_os_proto::transport::Transport for LazyVsockTransport {
     fn recv_action(&mut self) -> anyhow::Result<lex_os_proto::msg::AgentActionMsg> {
         self.ensure()?.recv_action()
     }
+    fn reconnect(&mut self) -> anyhow::Result<()> {
+        // Drop the dead guest's stream. The host UDS listener survives a
+        // reprovision (Firecracker connects to `${uds}_${PORT}`, which the
+        // perimeter's teardown leaves in place), so the next `ensure()` blocks
+        // on `accept()` until the freshly booted guest connects.
+        self.inner = None;
+        Ok(())
+    }
 }
 
 /// Boot the agent **inside** a Firecracker microVM and drive the supervisor
@@ -542,6 +564,7 @@ fn run_guest_in_vm(
     env: &lex_os_resolver::Environment,
     model: Option<String>,
     ollama_url: Option<String>,
+    guest_script: Option<String>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
     use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
     use lex_os_proto::fc_host::FcVsockHost;
@@ -558,10 +581,16 @@ fn run_guest_in_vm(
         .unwrap_or("devstral-small-2:latest")
         .to_string();
 
+    // An optional deterministic in-guest script (e.g. the reprovision demo),
+    // passed on the kernel cmdline; init.agent turns it into LEX_OS_GUEST_SCRIPT.
+    let script_arg = match guest_script.as_deref() {
+        Some(s) if !s.is_empty() => format!(" guest_script={s}"),
+        _ => String::new(),
+    };
     let assets = FirecrackerAssets {
         boot_args: format!(
             "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.agent \
-             ollama_host={ollama_host} ollama_model={model_name}"
+             ollama_host={ollama_host} ollama_model={model_name}{script_arg}"
         ),
         ..FirecrackerAssets::default()
     };
@@ -608,6 +637,7 @@ fn run_guest_subprocess(
     model: Option<String>,
     ollama_url: Option<String>,
     guest_bin: Option<PathBuf>,
+    guest_script: Option<String>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
     #[cfg(feature = "firecracker")]
     use lex_os_perimeter::FirecrackerPerimeter;
@@ -650,6 +680,7 @@ fn run_guest_subprocess(
         .stderr(Stdio::inherit()) // guest's eprintln! goes to our stderr
         .env("OLLAMA_HOST", &ollama_host)
         .env("OLLAMA_MODEL", &model_name)
+        .env("LEX_OS_GUEST_SCRIPT", guest_script.as_deref().unwrap_or(""))
         .spawn()
         .map_err(|e| anyhow::anyhow!("could not spawn {}: {e}", bin.display()))?;
 

@@ -100,11 +100,21 @@ pub struct AgentView<'a> {
     /// Commands completed so far, restored from checkpoint after a
     /// reprovision — the agent is re-instantiated where it left off.
     pub completed: &'a [String],
+    /// How many times the box has been rebuilt under this agent. The agent
+    /// reasons on a fresh box after a reprovision; this is its only signal that
+    /// the box changed underneath it (the completed list is restored either way).
+    pub reprovisions: u32,
 }
 
 /// The agent: brings judgment, holds no authority.
 pub trait Agent {
     fn next_action(&mut self, view: &AgentView) -> AgentAction;
+
+    /// Called by the supervisor right after it rebuilds (reprovisions) the box,
+    /// so a transport-backed agent can re-establish its channel to the freshly
+    /// booted guest. Default: no-op — in-process and scripted agents have
+    /// nothing to reconnect.
+    fn on_reprovision(&mut self) {}
 }
 
 /// External, supervisor-owned progress record. Held outside the box so
@@ -268,8 +278,11 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                     backend: self.perimeter.backend_name().to_string(),
                     reprovision: true,
                 });
-                // The agent is re-instantiated where it left off; budget
+                // Let the agent re-attach to the freshly booted box (the in-VM
+                // agent must re-`accept()` its vsock channel — the old guest is
+                // gone). The agent is re-instantiated where it left off; budget
                 // is NOT reset (it is external and survives).
+                agent.on_reprovision();
                 continue;
             }
 
@@ -278,6 +291,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                 step,
                 last_outcome: last_outcome.clone(),
                 completed: &checkpoint.completed,
+                reprovisions,
             };
             step += 1;
 
@@ -320,8 +334,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                             audit.append(Event::NarrowingBlocked {
                                 reason: reason.clone(),
                             });
-                            last_outcome =
-                                Some(format!("narrowing attempt blocked: {reason}"));
+                            last_outcome = Some(format!("narrowing attempt blocked: {reason}"));
                         }
                         Ok(()) => {
                             audit.append(Event::CommandAllowed {
@@ -468,6 +481,41 @@ mod tests {
                 .unwrap_or(AgentAction::Done);
             self.idx += 1;
             a
+        }
+    }
+
+    /// A scripted agent that also records the supervisor's reconnect hook and
+    /// the `reprovisions` count it sees on each view — the seam the in-VM agent
+    /// uses to re-`accept()` the rebuilt guest over vsock.
+    struct RecordingAgent {
+        actions: Vec<AgentAction>,
+        idx: usize,
+        on_reprovision_calls: u32,
+        views_reprovisions: Vec<u32>,
+    }
+    impl RecordingAgent {
+        fn new(actions: Vec<AgentAction>) -> Self {
+            Self {
+                actions,
+                idx: 0,
+                on_reprovision_calls: 0,
+                views_reprovisions: Vec::new(),
+            }
+        }
+    }
+    impl Agent for RecordingAgent {
+        fn next_action(&mut self, view: &AgentView) -> AgentAction {
+            self.views_reprovisions.push(view.reprovisions);
+            let a = self
+                .actions
+                .get(self.idx)
+                .cloned()
+                .unwrap_or(AgentAction::Done);
+            self.idx += 1;
+            a
+        }
+        fn on_reprovision(&mut self) {
+            self.on_reprovision_calls += 1;
         }
     }
 
@@ -646,6 +694,40 @@ mod tests {
     }
 
     #[test]
+    fn reprovision_notifies_agent_and_bumps_view_count() {
+        // The seam the in-VM (vsock) agent needs: when the box is rebuilt the
+        // supervisor must (a) tell the agent so it can re-attach its channel,
+        // and (b) surface the new reprovision count on the very next view.
+        let m = manifest(
+            Grant::new(Level::ReadWrite, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let mut agent = RecordingAgent::new(vec![
+            AgentAction::Run("fs.read".into()),
+            AgentAction::Destroy("dispose the box".into()),
+            AgentAction::Run("fs.write".into()),
+            AgentAction::Done,
+        ]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+
+        assert_eq!(report.outcome, Outcome::GoalMet);
+        assert_eq!(report.reprovisions, 1);
+        // The agent was notified exactly once — once per reprovision.
+        assert_eq!(agent.on_reprovision_calls, 1);
+        // The first views are on the original box (0); the view after the
+        // reprovision reports the box was rebuilt once.
+        assert_eq!(agent.views_reprovisions.first(), Some(&0));
+        assert_eq!(agent.views_reprovisions.last(), Some(&1));
+    }
+
+    #[test]
     fn propose_child_with_wider_grant_is_blocked_and_does_not_consume_budget() {
         // Parent has network: none; agent proposes a child with Full network
         // (a widening attempt). Supervisor must log NarrowingBlocked, the
@@ -666,19 +748,19 @@ mod tests {
             Grant::top(), // Full network — widens the parent
             Budget::research_default(),
         ));
-        let mut agent = ScriptedAgent::new(vec![
-            AgentAction::ProposeChild(child),
-            AgentAction::Done,
-        ]);
+        let mut agent =
+            ScriptedAgent::new(vec![AgentAction::ProposeChild(child), AgentAction::Done]);
         let report = sup.run(&Environment::full(), &mut agent).unwrap();
         // Session continues and reaches GoalMet.
         assert_eq!(report.outcome, Outcome::GoalMet);
         // Narrowing attempts do not spend command budget.
         assert_eq!(report.ledger.commands_used(), 0);
         // The audit log records the block.
-        let blocked = report.audit.entries().iter().any(|e| {
-            matches!(&e.event, Event::NarrowingBlocked { .. })
-        });
+        let blocked = report
+            .audit
+            .entries()
+            .iter()
+            .any(|e| matches!(&e.event, Event::NarrowingBlocked { .. }));
         assert!(blocked, "expected NarrowingBlocked in audit log");
         assert!(report.audit.verify().is_ok());
     }

@@ -10,6 +10,12 @@ pub struct AgentViewMsg {
     pub step: u64,
     pub last_outcome: Option<String>,
     pub completed: Vec<String>,
+    /// How many times the supervisor has rebuilt the box so far. The guest is
+    /// re-instantiated on a fresh box after a reprovision; this is the only
+    /// signal that the box it is now running in is not the one it started in.
+    /// Defaults to 0 for older peers / hand-built messages.
+    #[serde(default)]
+    pub reprovisions: u32,
 }
 
 /// Guest → Host. Serialisation of `lex_os_supervisor::AgentAction`.
@@ -39,6 +45,7 @@ mod tests {
             step: 3,
             last_outcome: Some("fs.read allowed".into()),
             completed: vec!["fs.list".into()],
+            reprovisions: 0,
         };
         let json = serde_json::to_string(&v).unwrap();
         let back: AgentViewMsg = serde_json::from_str(&json).unwrap();

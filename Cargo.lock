@@ -652,6 +652,7 @@ dependencies = [
 name = "lex-os-supervisor"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "lex-os-audit",
  "lex-os-manifest",
  "lex-os-perimeter",

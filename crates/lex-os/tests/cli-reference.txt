@@ -65,6 +65,9 @@ Options:
       --guest-bin <GUEST_BIN>
           Path to lex-os-guest binary for --agent guest (default: next to this exe)
 
+      --guest-script <GUEST_SCRIPT>
+          Deterministic in-guest script for --agent guest (e.g. "reprovision-demo"), in place of the LLM loop. Used by demos that need a fixed sequence
+
   -h, --help
           Print help (see a summary with '-h')
 
