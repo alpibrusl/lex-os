@@ -1,0 +1,31 @@
+name: ci
+
+# lex-os had no CI; this gates the workspace so the contract tests
+# (crates/lex-os/tests/cli_contract.rs) actually enforce that the README
+# and the CLI reference stay in sync with the binary. Default features
+# only — the `firecracker` perimeter needs a KVM host and is exercised
+# out-of-band via demo/.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
