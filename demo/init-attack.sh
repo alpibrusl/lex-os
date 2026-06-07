@@ -30,6 +30,16 @@ else
   echo " -> allowed target unreachable (results-stub not up, or rule missing)"
 fi
 
+echo "--- denied: host-local service NOT in the allowlist (INPUT fence) ---"
+# The host runs a second results-stub on :8080 that the grant does NOT list.
+# Reaching it would mean the box can hit arbitrary host-local services; the
+# INPUT catch-all DROP must block it even though a service is listening.
+if curl -fsS --max-time 5 http://169.254.42.1:8080/ 2>/dev/null; then
+  echo " -> UNEXPECTED: host-local :8080 succeeded -- INPUT wall did NOT fire"
+else
+  echo " -> blocked (host-local egress fenced)"
+fi
+
 echo "--- denied: named host outside the allowlist ---"
 if curl -fsS --max-time 5 http://evil.com 2>/dev/null; then
   echo " -> UNEXPECTED: evil.com succeeded -- wall did NOT fire"

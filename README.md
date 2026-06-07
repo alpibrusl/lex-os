@@ -165,6 +165,7 @@ sudo bash demo/wall2.sh           # kernel egress wall: curl 8.8.8.8 blocked fro
 sudo bash demo/agent.sh           # a real LLM agent running INSIDE the microVM (local Ollama)
 sudo bash demo/agent.sh demo/manifest-agent-none.json   # same, with network denied by the grant
 sudo bash demo/reprovision.sh     # in-VM agent disposes its box mid-task; supervisor rebuilds it and re-attaches over vsock
+sudo bash demo/egress.sh          # egress allowed leg + host-local fence: box reaches ONLY the one allowlisted target
 ```
 
 `cargo run -p lex-os --features firecracker -- box-smoke` is the
@@ -184,7 +185,11 @@ locally by [Ollama] on the LAN:
   - **type-check wall** — a program whose effects exceed the grant is refused
     *before it runs* (`lex-os check`, exit 8);
   - **kernel egress wall** — from inside the booted microVM, traffic to a
-    non-allowlisted host is dropped at the host's tap (`8.8.8.8` blocked);
+    non-allowlisted host is dropped at the host's tap (`8.8.8.8` blocked). The
+    allowlist is enforced purely from the grant on both the FORWARD chain
+    (external targets) and the INPUT chain (host-local targets), so the box
+    reaches *only* what the grant lists — not even other services on its own
+    host (`demo/egress.sh`);
   - **narrowing wall** — the agent's attempt to widen its own grant
     (`propose_child`) is rejected; the grant only ever narrows.
 - With a `network: none` grant, the agent's `net.fetch` and `exec.shell` are
@@ -203,8 +208,10 @@ locally by [Ollama] on the LAN:
   under the jail; the demos pass these flags by default.
 - Every step lands in the **hash-chained audit log**, verified after the run.
 
-What this is *not* yet: the perimeter is single-tenant; the model is reached
-over the LAN rather than served in-box. It's an
+What this is *not* yet: one box runs at a time (a fixed jail id, no concurrent
+multi-box scheduling) — though a box can no longer reach other services on its
+host, since host-local egress is now fenced by the grant too; and the model is
+reached over the LAN rather than served in-box. It's an
 honest proof-of-concept of the design, demonstrated end-to-end on real
 hardware — not a hardened product.
 

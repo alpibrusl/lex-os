@@ -160,27 +160,26 @@ flushing iptables *inside* the guest changes nothing. The raw-IP probe
 (`8.8.8.8`) is the cleanest demonstration: no DNS is involved, so the only
 thing that can stop it is routing/firewalling at the boundary.
 
-> **Open: the ALLOWED leg of the egress wall is not yet validated.** The
-> denied probes above are the load-bearing demonstration and work via the
-> FORWARD chain (`-i tap-lex0 → DROP`). The *allowed* leg is harder and needs
-> an on-host topology decision in the issue #14 KVM smoke test:
+> **The ALLOWED leg is now wired, driven purely by the grant** (issue #27,
+> Task 4). `install_egress_allowlist` resolves each grant `egress` entry to an
+> IP and installs an ACCEPT on **both** chains, then a fail-closed catch-all
+> DROP on each:
 >
-> - `install_egress_allowlist` writes an `iptables -d <host>` rule on the
->   **filter/FORWARD** chain. FORWARD only sees traffic the host *routes*
->   between interfaces — so it requires `sysctl net.ipv4.ip_forward=1` (the
->   backend does not set this yet) and, for genuinely external targets, a
->   POSTROUTING MASQUERADE.
-> - If the allowed target is the host-local `results-stub` (reached at the
->   tap gateway `169.254.42.1`), that traffic is delivered **locally via
->   INPUT, not FORWARD**, so the FORWARD ACCEPT never matches it. Either run
->   the stub somewhere reached over FORWARD, or add an INPUT-chain ACCEPT for
->   the allowed host:port.
-> - `iptables -d <hostname>` resolves the name to an IP **at insertion time**;
->   that IP must equal what the guest actually dials. Pin both via `/etc/hosts`
->   (host + guest), or switch the allowlist/rule to IPs.
+> - **FORWARD** governs external / routed targets (with a POSTROUTING
+>   MASQUERADE + ESTABLISHED,RELATED return from `install_nat`) — e.g. the
+>   in-VM agent reaching its model over the LAN.
+> - **INPUT** governs *host-local* targets reached at the tap gateway
+>   `169.254.42.1` (delivered locally via INPUT, never FORWARD). This also
+>   **closes a single-tenant hole**: with only FORWARD fenced, a box could
+>   reach any service on its host; the `-i tap → DROP` on INPUT stops that, so
+>   the box reaches host-local services *only* if the grant lists them.
 >
-> None of this affects the security property (it fails closed — unmatched
-> traffic is dropped), only the demo's "allowed traffic still flows" contrast.
+> Targets are pinned to IPs at insertion time, so the rule matches exactly what
+> the guest dials. `demo/egress.sh` proves it: the one allowlisted target
+> (`169.254.42.1:443`) returns 200, a non-allowlisted host-local service on
+> `:8080` is dropped *even though it is listening*, and external hosts are
+> dropped. The wall still fails closed — unmatched traffic is dropped on both
+> chains.
 
 ### Wall 3 — narrowing (live, logged)
 
