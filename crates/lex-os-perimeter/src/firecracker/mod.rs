@@ -4,6 +4,7 @@
 //! [`Perimeter`] trait against Firecracker's HTTP management API.
 
 mod api;
+mod jail;
 mod net;
 mod vm;
 
