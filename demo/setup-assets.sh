@@ -30,7 +30,8 @@ if [ ! -x ./firecracker ]; then
   rm -rf "$FC_REL" "$FC_TGZ"
 fi
 
-# 2. Install firecracker onto PATH so vm.rs can spawn it (needs root).
+# 2. Install firecracker + jailer onto PATH (needs root). vm.rs spawns
+#    firecracker directly (unjailed) or via jailer (the hardened, non-root path).
 if ! command -v firecracker >/dev/null 2>&1; then
   if [ "$(id -u)" -eq 0 ]; then
     echo "+ installing firecracker to /usr/local/bin"
@@ -38,6 +39,15 @@ if ! command -v firecracker >/dev/null 2>&1; then
   else
     echo "! firecracker not on PATH; re-run with sudo, or:"
     echo "    sudo install -m 0755 $(pwd)/firecracker /usr/local/bin/firecracker"
+  fi
+fi
+if ! command -v jailer >/dev/null 2>&1; then
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "+ installing jailer to /usr/local/bin"
+    install -m 0755 ./jailer /usr/local/bin/jailer
+  else
+    echo "! jailer not on PATH; re-run with sudo, or:"
+    echo "    sudo install -m 0755 $(pwd)/jailer /usr/local/bin/jailer"
   fi
 fi
 

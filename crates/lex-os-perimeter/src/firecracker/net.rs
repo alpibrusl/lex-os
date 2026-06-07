@@ -56,8 +56,26 @@ pub(super) fn parse_host_port(entry: &str) -> Result<(String, u16), NetError> {
 }
 
 /// Create a tap interface and bring it up. Requires CAP_NET_ADMIN (root).
-pub(super) fn create_tap(tap: &str, host_ip_cidr: &str) -> Result<(), NetError> {
-    run("ip", &["tuntap", "add", tap, "mode", "tap"])?;
+/// Create the host tap. When `owner` is `Some((uid, gid))` the tap is created
+/// owned by that uid/gid so a privilege-dropped (jailed) firecracker can open
+/// it — without it, only root could attach the device. The host keeps the .1 of
+/// the /30 and stays able to administer the interface either way.
+pub(super) fn create_tap(
+    tap: &str,
+    host_ip_cidr: &str,
+    owner: Option<(u32, u32)>,
+) -> Result<(), NetError> {
+    let mut add = vec![
+        "tuntap".to_string(),
+        "add".into(),
+        tap.into(),
+        "mode".into(),
+        "tap".into(),
+    ];
+    if let Some((uid, gid)) = owner {
+        add.extend(["user".into(), uid.to_string(), "group".into(), gid.to_string()]);
+    }
+    run("ip", &as_str_slice(&add))?;
     run("ip", &["addr", "add", host_ip_cidr, "dev", tap])?;
     run("ip", &["link", "set", tap, "up"])?;
     Ok(())
@@ -340,7 +358,7 @@ mod tests {
     #[test]
     #[ignore = "requires root + iproute2 + iptables; run on the KVM host"]
     fn create_and_destroy_tap_on_host() {
-        create_tap("tap-lex-test", "169.254.42.1/30").expect("create");
+        create_tap("tap-lex-test", "169.254.42.1/30", None).expect("create");
         destroy_tap("tap-lex-test").expect("destroy");
     }
 }

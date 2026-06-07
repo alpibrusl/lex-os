@@ -146,6 +146,8 @@ enum Cmd {
         /// in place of the LLM loop. Used by demos that need a fixed sequence.
         #[arg(long)]
         guest_script: Option<String>,
+        #[command(flatten)]
+        jail: JailArgs,
     },
     /// Negotiate a manifest against the (simulated) host and show what
     /// it resolves to — without running anything.
@@ -191,7 +193,45 @@ enum Cmd {
         /// Seconds to let the guest boot and run its init before teardown.
         #[arg(long, default_value_t = 12)]
         dwell: u64,
+        #[command(flatten)]
+        jail: JailArgs,
     },
+}
+
+/// Flags controlling whether firecracker runs under the jailer (chroot +
+/// dropped privileges). Shared by `run` and `box-smoke`. Provide both
+/// `--jail-uid` and `--jail-gid` to jail; omit to run firecracker as root.
+#[derive(clap::Args, Clone)]
+struct JailArgs {
+    /// uid firecracker is dropped to under the jailer (e.g. the invoking user).
+    #[arg(long)]
+    jail_uid: Option<u32>,
+    /// gid firecracker runs as — use the `kvm` group so /dev/kvm is reachable.
+    #[arg(long)]
+    jail_gid: Option<u32>,
+    /// Base directory for the per-VM chroot.
+    #[arg(long, default_value = "/srv/jailer")]
+    jail_base: PathBuf,
+    /// Per-VM jail id (chroot + cgroup name); kept stable across reprovisions.
+    #[arg(long, default_value = "lex-os")]
+    jail_id: String,
+}
+
+#[cfg(feature = "firecracker")]
+impl JailArgs {
+    /// A `JailConfig` when both uid and gid are given, else `None` (unjailed).
+    fn to_config(&self) -> Option<lex_os_perimeter::JailConfig> {
+        match (self.jail_uid, self.jail_gid) {
+            (Some(uid), Some(gid)) => Some(lex_os_perimeter::JailConfig {
+                uid,
+                gid,
+                chroot_base: self.jail_base.clone(),
+                id: self.jail_id.clone(),
+                jailer_bin: "jailer".into(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -249,6 +289,7 @@ fn main() {
             ollama_url,
             guest_bin,
             guest_script,
+            jail,
         } => cmd_run(
             &fmt,
             manifest,
@@ -260,6 +301,7 @@ fn main() {
             ollama_url,
             guest_bin,
             guest_script,
+            jail,
         ),
         Cmd::Resolve {
             manifest,
@@ -271,7 +313,11 @@ fn main() {
         Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
         Cmd::Introspect => cmd_introspect(&fmt),
         #[cfg(feature = "firecracker")]
-        Cmd::BoxSmoke { manifest, dwell } => cmd_box_smoke(&fmt, manifest, dwell),
+        Cmd::BoxSmoke {
+            manifest,
+            dwell,
+            jail,
+        } => cmd_box_smoke(&fmt, manifest, dwell, jail),
     };
     std::process::exit(code.code());
 }
@@ -312,7 +358,9 @@ fn cmd_run(
     ollama_url: Option<String>,
     guest_bin: Option<PathBuf>,
     guest_script: Option<String>,
+    jail: JailArgs,
 ) -> ExitCode {
+    let _ = &jail; // consumed only by the firecracker guest path below
     let start = Instant::now();
 
     // Before anything runs, make the boundary unmistakable: if this isn't a
@@ -448,7 +496,15 @@ fn cmd_run(
             #[cfg(feature = "firecracker")]
             let res = {
                 let _ = guest_bin; // not used for the in-VM path
-                run_guest_in_vm(fmt, manifest.clone(), &env, model, ollama_url, guest_script)
+                run_guest_in_vm(
+                    fmt,
+                    manifest.clone(),
+                    &env,
+                    model,
+                    ollama_url,
+                    guest_script,
+                    jail.to_config(),
+                )
             };
             #[cfg(not(feature = "firecracker"))]
             let res = run_guest_subprocess(
@@ -499,15 +555,18 @@ fn cmd_run(
     ExitCode::Success
 }
 
-/// Host transport that accepts the guest's vsock connection lazily, on first
-/// use. The supervisor only connects *after* it has provisioned (booted) the
-/// VM, so we cannot block on `accept()` up front — the guest doesn't exist yet.
-/// The host UDS listener is bound before provisioning (so Firecracker can
-/// connect when the guest boots); the first `send_view`/`recv_action` blocks
-/// until the guest is up.
+/// Host transport that binds its vsock listener and accepts the guest lazily,
+/// on first use. We can't bind/accept up front because the supervisor only
+/// provisions (boots) the VM later — and under the jailer the socket lives
+/// inside a chroot that doesn't exist until then. `reconnect` (called after a
+/// reprovision) drops *both* the stream and the listener so the next `ensure`
+/// rebinds at the recreated path and accepts the freshly booted guest. The
+/// guest retries its vsock connect for ~15s, covering the rebind window.
 #[cfg(feature = "firecracker")]
 struct LazyVsockTransport {
-    host: lex_os_proto::fc_host::FcVsockHost,
+    /// Host-visible base path; the listener binds `${base}_${VSOCK_PORT}`.
+    vsock_base: std::path::PathBuf,
+    host: Option<lex_os_proto::fc_host::FcVsockHost>,
     inner: Option<
         lex_os_proto::transport::StreamTransport<
             std::io::BufReader<std::os::unix::net::UnixStream>,
@@ -518,6 +577,14 @@ struct LazyVsockTransport {
 
 #[cfg(feature = "firecracker")]
 impl LazyVsockTransport {
+    fn new(vsock_base: std::path::PathBuf) -> Self {
+        Self {
+            vsock_base,
+            host: None,
+            inner: None,
+        }
+    }
+
     fn ensure(
         &mut self,
     ) -> anyhow::Result<
@@ -526,9 +593,14 @@ impl LazyVsockTransport {
             std::os::unix::net::UnixStream,
         >,
     > {
+        if self.host.is_none() {
+            self.host = Some(lex_os_proto::fc_host::FcVsockHost::bind_default(
+                &self.vsock_base,
+            )?);
+        }
         if self.inner.is_none() {
             eprintln!("[supervisor] waiting for the guest to connect over vsock...");
-            self.inner = Some(self.host.accept()?);
+            self.inner = Some(self.host.as_ref().unwrap().accept()?);
             eprintln!("[supervisor] guest connected over vsock");
         }
         Ok(self.inner.as_mut().unwrap())
@@ -544,11 +616,12 @@ impl lex_os_proto::transport::Transport for LazyVsockTransport {
         self.ensure()?.recv_action()
     }
     fn reconnect(&mut self) -> anyhow::Result<()> {
-        // Drop the dead guest's stream. The host UDS listener survives a
-        // reprovision (Firecracker connects to `${uds}_${PORT}`, which the
-        // perimeter's teardown leaves in place), so the next `ensure()` blocks
-        // on `accept()` until the freshly booted guest connects.
+        // Drop the dead guest's stream AND the old listener. Under the jailer
+        // the previous chroot (and its socket) was removed on reprovision, so
+        // the next `ensure()` rebinds at the recreated path and re-`accept()`s
+        // the new guest. (Unjailed, rebinding the same path works too.)
         self.inner = None;
+        self.host = None;
         Ok(())
     }
 }
@@ -565,9 +638,9 @@ fn run_guest_in_vm(
     model: Option<String>,
     ollama_url: Option<String>,
     guest_script: Option<String>,
+    jail: Option<lex_os_perimeter::JailConfig>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
     use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
-    use lex_os_proto::fc_host::FcVsockHost;
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
 
     let ollama_host = ollama_url
@@ -592,16 +665,32 @@ fn run_guest_in_vm(
             "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.agent \
              ollama_host={ollama_host} ollama_model={model_name}{script_arg}"
         ),
+        jail: jail.clone(),
         ..FirecrackerAssets::default()
     };
 
-    eprintln!(
-        "[supervisor] booting microVM; in-guest agent → ollama={ollama_host} model={model_name}"
-    );
+    match &jail {
+        Some(c) => eprintln!(
+            "[supervisor] booting JAILED microVM (uid={} gid={} chroot={}/firecracker/{}); \
+             in-guest agent → ollama={ollama_host} model={model_name}",
+            c.uid,
+            c.gid,
+            c.chroot_base.display(),
+            c.id
+        ),
+        None => eprintln!(
+            "[supervisor] booting microVM (UNJAILED — firecracker runs as root); \
+             in-guest agent → ollama={ollama_host} model={model_name}"
+        ),
+    }
 
-    // Bind the host UDS listener BEFORE provisioning so Firecracker can connect
-    // to it when the guest opens its vsock channel during boot.
-    let host = FcVsockHost::bind_default(&assets.socket_vsock)?;
+    // Build the perimeter first so we can ask it where the vsock socket will
+    // live (under the jailer it's inside the chroot, not at the configured base).
+    // The transport binds there lazily — after provisioning has created the jail.
+    let perimeter = FirecrackerPerimeter::with_assets(assets);
+    let vsock_base = perimeter
+        .vsock_host_path()
+        .ok_or_else(|| anyhow::anyhow!("vsock not configured for the in-VM agent"))?;
 
     // A real LLM can loop on a wall; cap total steps so a misbehaving agent is
     // bounded by the supervisor regardless (the guest also gives up after a few
@@ -613,11 +702,11 @@ fn run_guest_in_vm(
     let supervisor = Supervisor::new(
         manifest.clone(),
         demo::demo_registry(),
-        FirecrackerPerimeter::with_assets(assets),
+        perimeter,
         SystemClock,
         limits,
     );
-    let transport = LazyVsockTransport { host, inner: None };
+    let transport = LazyVsockTransport::new(vsock_base);
     let mut agent = VsockAgent::new(transport, manifest);
     let report = supervisor.run(env, &mut agent)?;
     Ok(report)
@@ -719,8 +808,13 @@ fn run_guest_subprocess(
 /// streams live — then tear the box down. Bypasses the supervisor loop on
 /// purpose: this exercises the perimeter alone, long enough to observe it.
 #[cfg(feature = "firecracker")]
-fn cmd_box_smoke(fmt: &OutputFormat, manifest: Option<PathBuf>, dwell: u64) -> ExitCode {
-    use lex_os_perimeter::{Perimeter, SandboxPolicy};
+fn cmd_box_smoke(
+    fmt: &OutputFormat,
+    manifest: Option<PathBuf>,
+    dwell: u64,
+    jail: JailArgs,
+) -> ExitCode {
+    use lex_os_perimeter::{FirecrackerAssets, Perimeter, SandboxPolicy};
 
     let manifest = match load_manifest(&manifest) {
         Ok(m) => m,
@@ -734,12 +828,18 @@ fn cmd_box_smoke(fmt: &OutputFormat, manifest: Option<PathBuf>, dwell: u64) -> E
         }
     };
     let policy = SandboxPolicy::from_manifest(&manifest);
+    let jail_cfg = jail.to_config();
     eprintln!(
-        "box-smoke: provisioning microVM; egress allowlist = {:?}",
+        "box-smoke: provisioning {} microVM; egress allowlist = {:?}",
+        if jail_cfg.is_some() { "JAILED" } else { "UNJAILED (root)" },
         policy.egress
     );
 
-    let mut perim = FirecrackerPerimeter::new();
+    let assets = FirecrackerAssets {
+        jail: jail_cfg,
+        ..FirecrackerAssets::default()
+    };
+    let mut perim = FirecrackerPerimeter::with_assets(assets);
     if let Err(e) = perim.provision(policy) {
         return emit_err(
             fmt,

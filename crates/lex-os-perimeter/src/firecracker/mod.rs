@@ -4,10 +4,11 @@
 //! [`Perimeter`] trait against Firecracker's HTTP management API.
 
 mod api;
+mod jail;
 mod net;
 mod vm;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use api::{put_json, wait_for_socket, with_socket};
@@ -15,6 +16,8 @@ use net::{
     create_tap, destroy_tap, flush_egress_rules, flush_nat, install_egress_allowlist, install_nat,
 };
 use vm::FirecrackerVm;
+
+pub use jail::JailConfig;
 
 use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
 use lex_os_manifest::{Dimension, IsolationFloor, Level};
@@ -40,6 +43,11 @@ pub struct FirecrackerAssets {
     pub socket_vsock: PathBuf,
     /// Guest context id for the vsock device (host is always CID 2).
     pub guest_cid: u32,
+    /// When set, firecracker is launched under the jailer (chroot + dropped
+    /// privileges + cgroup) instead of directly as root. `None` keeps the
+    /// legacy run-as-root path (tests, hosts without a jailer). Real runs should
+    /// set this — running the VMM as root defeats "sealed at the edge".
+    pub jail: Option<JailConfig>,
 }
 
 impl Default for FirecrackerAssets {
@@ -53,6 +61,7 @@ impl Default for FirecrackerAssets {
             boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.demo".into(),
             socket_vsock: PathBuf::from("/tmp/firecracker-lex-os-vsock.sock"),
             guest_cid: 3,
+            jail: None,
         }
     }
 }
@@ -153,74 +162,154 @@ impl Perimeter for FirecrackerPerimeter {
     }
 }
 
+/// Where a file lives for the host (which stays root) versus how firecracker
+/// names it. Identical unjailed; under the jailer the host addresses files at
+/// their chroot location while firecracker, chrooted, names them from its root.
+struct Layout {
+    /// Path the host connects to for the API socket.
+    api_sock_host: PathBuf,
+    /// Value of firecracker's `--api-sock` (in-jail when jailed).
+    api_sock_arg: String,
+    /// `kernel_image_path` for `/boot-source`.
+    kernel_arg: String,
+    /// `path_on_host` for the rootfs drive.
+    rootfs_arg: String,
+    /// `uds_path` for `/vsock`; empty disables the vsock device.
+    vsock_arg: String,
+    /// Host base path for the vsock channel (FcVsockHost binds `${base}_${port}`);
+    /// empty when there is no vsock.
+    vsock_host_base: PathBuf,
+    /// `Some(chroot_root)` when jailed — assets are staged into it after boot.
+    jail_root: Option<PathBuf>,
+}
+
 impl FirecrackerPerimeter {
+    /// Host-visible path of the vsock channel base (`${this}_${port}` is the
+    /// socket FcVsockHost binds). `None` when no vsock device / no in-VM agent.
+    /// The supervisor's transport needs this because under the jailer it lives
+    /// inside the chroot, not at the configured `socket_vsock`.
+    pub fn vsock_host_path(&self) -> Option<PathBuf> {
+        let lay = self.layout();
+        (!lay.vsock_host_base.as_os_str().is_empty()).then_some(lay.vsock_host_base)
+    }
+
+    fn layout(&self) -> Layout {
+        let a = &self.assets;
+        let has_vsock = !a.socket_vsock.as_os_str().is_empty();
+        match &a.jail {
+            None => Layout {
+                api_sock_host: a.socket.clone(),
+                api_sock_arg: a.socket.display().to_string(),
+                kernel_arg: a.kernel.display().to_string(),
+                rootfs_arg: a.rootfs.display().to_string(),
+                vsock_arg: a.socket_vsock.display().to_string(),
+                vsock_host_base: a.socket_vsock.clone(),
+                jail_root: None,
+            },
+            Some(cfg) => {
+                let root = jail::chroot_root(cfg);
+                Layout {
+                    api_sock_host: root.join("fc.sock"),
+                    api_sock_arg: "/fc.sock".into(),
+                    kernel_arg: "/vmlinux".into(),
+                    rootfs_arg: "/rootfs.ext4".into(),
+                    vsock_arg: if has_vsock { "/vsock.sock".into() } else { String::new() },
+                    vsock_host_base: if has_vsock {
+                        root.join("vsock.sock")
+                    } else {
+                        PathBuf::new()
+                    },
+                    jail_root: Some(root),
+                }
+            }
+        }
+    }
+
     /// Boot the microVM and install the host egress wall, returning the live
     /// child handle. Performs no `self` state mutation so the caller can roll
     /// back cleanly on error.
     fn boot_microvm(&self, policy: &SandboxPolicy) -> Result<FirecrackerVm, PerimeterError> {
-        // 1. Clear leftovers from a previous crashed run (stale API socket,
-        //    tap device, and our iptables rules) so provisioning is idempotent
-        //    — otherwise `ip tuntap add` fails with EBUSY on a lingering tap.
+        let lay = self.layout();
+
+        // 1. Clear leftovers from a previous crashed run (stale socket, tap,
+        //    iptables rules, and any prior chroot) so provisioning is
+        //    idempotent — otherwise `ip tuntap add` fails with EBUSY on a
+        //    lingering tap and jailer refuses an existing chroot/cgroup.
         self.teardown_host();
 
         // 2. Create the host tap and install the egress wall BEFORE telling
-        //    firecracker about the interface. Firecracker opens the tap by name
-        //    when `/network-interfaces` is configured, so the device must
-        //    already exist — if we created it afterwards, our `ip tuntap add`
-        //    would race firecracker for the name and fail with EBUSY.
-        create_tap(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
+        //    firecracker about the interface. When jailed the tap is owned by
+        //    the dropped uid/gid so the chrooted firecracker can open it.
+        let owner = self.assets.jail.as_ref().map(|c| (c.uid, c.gid));
+        create_tap(&self.assets.tap, &self.assets.host_ip_cidr, owner).map_err(perimeter_err)?;
         install_egress_allowlist(&self.assets.tap, &policy.egress).map_err(perimeter_err)?;
         install_nat(&self.assets.tap, &self.assets.host_ip_cidr).map_err(perimeter_err)?;
 
-        // 3. Spawn firecracker; wait for the API socket to accept connections.
-        let vm = FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?;
-        wait_for_socket(&self.assets.socket, Duration::from_secs(2)).map_err(perimeter_err)?;
+        // 3. Spawn firecracker — directly (root) or under the jailer — then wait
+        //    for the API socket. When jailed, jailer creates the chroot before
+        //    exec'ing firecracker, so by the time the socket answers the chroot
+        //    exists and we can stage the kernel + rootfs into it.
+        let vm = match &self.assets.jail {
+            None => FirecrackerVm::spawn(self.assets.socket.clone()).map_err(perimeter_err)?,
+            Some(cfg) => {
+                std::fs::create_dir_all(&cfg.chroot_base).map_err(perimeter_err)?;
+                let fc = firecracker_exec_path();
+                let argv = jail::build_jailer_argv(cfg, &fc, &lay.api_sock_arg);
+                FirecrackerVm::spawn_jailed(&cfg.jailer_bin, argv, lay.api_sock_host.clone())
+                    .map_err(perimeter_err)?
+            }
+        };
+        wait_for_socket(&lay.api_sock_host, Duration::from_secs(5)).map_err(perimeter_err)?;
 
-        // 4. Configure the boot source.
+        // 3b. Stage assets into the freshly-created chroot (jailed only). Kernel
+        //     is hard-linked (read-only, shared is fine); the rootfs is copied
+        //     so each box gets its own writable disk — the original asset is
+        //     never mutated, matching the "disposable box" model.
+        if let (Some(root), Some(cfg)) = (&lay.jail_root, &self.assets.jail) {
+            stage_jail_assets(root, &self.assets, cfg.uid, cfg.gid)?;
+        }
+
+        // 4. Boot source.
         let boot = format!(
             r#"{{"kernel_image_path":"{}","boot_args":"{}"}}"#,
-            self.assets.kernel.display(),
-            self.assets.boot_args
+            lay.kernel_arg, self.assets.boot_args
         );
-        with_socket(&self.assets.socket, |s| put_json(s, "/boot-source", &boot))
+        with_socket(&lay.api_sock_host, |s| put_json(s, "/boot-source", &boot))
             .map_err(perimeter_err)?;
 
-        // 5. Configure the rootfs drive (writable; the agent is root inside).
+        // 5. Rootfs drive (writable; the agent is root inside its own box).
         let drive = format!(
             r#"{{"drive_id":"rootfs","path_on_host":"{}","is_root_device":true,"is_read_only":false}}"#,
-            self.assets.rootfs.display()
+            lay.rootfs_arg
         );
-        with_socket(&self.assets.socket, |s| {
-            put_json(s, "/drives/rootfs", &drive)
-        })
-        .map_err(perimeter_err)?;
+        with_socket(&lay.api_sock_host, |s| put_json(s, "/drives/rootfs", &drive))
+            .map_err(perimeter_err)?;
 
-        // 6. Configure the network interface (the tap already exists, step 2).
+        // 6. Network interface (the tap already exists, step 2).
         let net = format!(
             r#"{{"iface_id":"eth0","host_dev_name":"{}"}}"#,
             self.assets.tap
         );
-        with_socket(&self.assets.socket, |s| {
+        with_socket(&lay.api_sock_host, |s| {
             put_json(s, "/network-interfaces/eth0", &net)
         })
         .map_err(perimeter_err)?;
 
-        // 6b. Configure the vsock device for the guest↔supervisor channel.
-        //     Skipped when socket_vsock is empty (the attack-script demo has no
-        //     in-guest agent). The host must already be listening on
-        //     `${socket_vsock}_${VSOCK_PORT}` (see lex_os_proto::fc_host).
-        if !self.assets.socket_vsock.as_os_str().is_empty() {
+        // 6b. vsock device for the guest↔supervisor channel. Skipped when there
+        //     is no in-guest agent (attack-script demo). The host listens on
+        //     `${vsock_host_base}_${VSOCK_PORT}` (see lex_os_proto::fc_host);
+        //     under the jailer that path is inside the chroot.
+        if !lay.vsock_arg.is_empty() {
             let vsock = format!(
                 r#"{{"guest_cid":{},"uds_path":"{}"}}"#,
-                self.assets.guest_cid,
-                self.assets.socket_vsock.display()
+                self.assets.guest_cid, lay.vsock_arg
             );
-            with_socket(&self.assets.socket, |s| put_json(s, "/vsock", &vsock))
+            with_socket(&lay.api_sock_host, |s| put_json(s, "/vsock", &vsock))
                 .map_err(perimeter_err)?;
         }
 
         // 7. Start the VM. Firecracker's /actions is a PUT (it has no POST).
-        with_socket(&self.assets.socket, |s| {
+        with_socket(&lay.api_sock_host, |s| {
             put_json(s, "/actions", r#"{"action_type":"InstanceStart"}"#)
         })
         .map_err(perimeter_err)?;
@@ -228,19 +317,66 @@ impl FirecrackerPerimeter {
         Ok(vm)
     }
 
-    /// Remove the host-side footprint: egress rules, tap device, API socket,
-    /// and the vsock UDS. Idempotent — every step ignores "already gone".
-    /// (Firecracker binds the vsock `uds_path` itself and does not unlink it on
-    /// exit, so a stale file makes the next `PUT /vsock` fail with EADDRINUSE.)
+    /// Remove the host-side footprint: egress rules, tap, and either the bare
+    /// sockets (unjailed) or the whole per-VM jail tree + its cgroup (jailed).
+    /// Idempotent — every step ignores "already gone".
     fn teardown_host(&self) {
         flush_nat(&self.assets.tap, &self.assets.host_ip_cidr);
         let _ = flush_egress_rules(&self.assets.tap);
         let _ = destroy_tap(&self.assets.tap);
-        let _ = std::fs::remove_file(&self.assets.socket);
-        if !self.assets.socket_vsock.as_os_str().is_empty() {
-            let _ = std::fs::remove_file(&self.assets.socket_vsock);
+        match &self.assets.jail {
+            None => {
+                let _ = std::fs::remove_file(&self.assets.socket);
+                if !self.assets.socket_vsock.as_os_str().is_empty() {
+                    let _ = std::fs::remove_file(&self.assets.socket_vsock);
+                }
+            }
+            Some(cfg) => {
+                // The chroot holds the API socket, vsock socket, and staged
+                // assets; removing it clears them all. The cgroup must go too or
+                // jailer refuses to reuse the id on reprovision.
+                let _ = std::fs::remove_dir_all(jail::chroot_id_dir(cfg));
+                let _ = std::fs::remove_dir(jail::cgroup_v2_dir(cfg));
+            }
         }
     }
+}
+
+/// Absolute path to the firecracker binary jailer should hard-link into the
+/// chroot. `--exec-file` must be a real file, not a PATH name; prefer the
+/// install location `demo/setup-assets.sh` uses, then a couple of fallbacks.
+fn firecracker_exec_path() -> PathBuf {
+    for p in ["/usr/local/bin/firecracker", "/usr/bin/firecracker"] {
+        if Path::new(p).exists() {
+            return PathBuf::from(p);
+        }
+    }
+    PathBuf::from("firecracker")
+}
+
+/// Stage the kernel and rootfs into the jail chroot and make them accessible to
+/// the dropped uid/gid. Kernel: hard-link (read-only); rootfs: copy (per-VM
+/// writable), then chown to the jail user so firecracker can open it rw.
+fn stage_jail_assets(
+    root: &Path,
+    assets: &FirecrackerAssets,
+    uid: u32,
+    gid: u32,
+) -> Result<(), PerimeterError> {
+    use std::os::unix::fs::chown;
+
+    let kdst = root.join("vmlinux");
+    let _ = std::fs::remove_file(&kdst);
+    std::fs::hard_link(&assets.kernel, &kdst)
+        .or_else(|_| std::fs::copy(&assets.kernel, &kdst).map(|_| ()))
+        .map_err(perimeter_err)?;
+
+    let rdst = root.join("rootfs.ext4");
+    let _ = std::fs::remove_file(&rdst);
+    std::fs::copy(&assets.rootfs, &rdst).map_err(perimeter_err)?;
+    chown(&rdst, Some(uid), Some(gid)).map_err(perimeter_err)?;
+
+    Ok(())
 }
 
 #[cfg(test)]

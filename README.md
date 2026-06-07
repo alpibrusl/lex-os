@@ -196,10 +196,15 @@ locally by [Ollama] on the LAN:
   channel to the new guest, and the agent resumes where it left off — proven by
   `demo/reprovision.sh` (the rebuilt box completes `report.write`, not just a
   hollow give-up).
+- **Firecracker runs jailed, not as root.** With `--jail-uid/--jail-gid` the VMM
+  is launched under `jailer` — a per-VM chroot with privileges dropped to a
+  non-root uid:gid — so a VM escape doesn't land in a root host context. All of
+  the above (egress wall, in-VM agent over vsock, reprovision re-attach) holds
+  under the jail; the demos pass these flags by default.
 - Every step lands in the **hash-chained audit log**, verified after the run.
 
-What this is *not* yet: the perimeter is single-tenant and runs as root (no
-jailer); the model is reached over the LAN rather than served in-box. It's an
+What this is *not* yet: the perimeter is single-tenant; the model is reached
+over the LAN rather than served in-box. It's an
 honest proof-of-concept of the design, demonstrated end-to-end on real
 hardware — not a hardened product.
 

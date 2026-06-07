@@ -26,6 +26,7 @@ check "running as root"                       test "$(id -u)" -eq 0
 check "/dev/kvm present"                       test -e /dev/kvm
 check "x86_64 virtualization available"       sh -c 'grep -qE "vmx|svm" /proc/cpuinfo'
 check "firecracker on PATH"                    command -v firecracker
+check "jailer on PATH (hardened path)"         command -v jailer
 check "ip (iproute2) on PATH"                  command -v ip
 check "iptables on PATH"                       command -v iptables
 check "guest kernel present"                   test -f demo/assets/vmlinux

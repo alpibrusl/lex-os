@@ -24,6 +24,12 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
 fi
 LEXOS="$REPO_ROOT/target/debug/lex-os"
 
+# Jail firecracker: drop to the invoking user's uid and the kvm group so the
+# chrooted, non-root VMM can still open /dev/kvm. Override via env if needed.
+JAIL_UID="${JAIL_UID:-${SUDO_UID:-$(id -u)}}"
+JAIL_GID="${JAIL_GID:-$(getent group kvm | cut -d: -f3)}"
+[ -n "$JAIL_GID" ] || { echo "wall2: no kvm group on this host; set JAIL_GID" >&2; exit 1; }
+
 echo "+ host check"
 bash demo/host-check.sh || { echo "wall2: host-check failed (need KVM + root + assets)" >&2; exit 1; }
 
@@ -31,5 +37,6 @@ echo "+ build"
 "${CARGO[@]}" build --quiet --features firecracker -p lex-os
 [ -x "$LEXOS" ] || { echo "wall2: build produced no binary" >&2; exit 1; }
 
-echo "+ booting the box — watch for the guest console and '8.8.8.8 -> blocked'"
-"$LEXOS" box-smoke --manifest demo/manifest.json --dwell "${DWELL:-12}"
+echo "+ booting the JAILED box (uid=$JAIL_UID gid=$JAIL_GID) — watch for the guest console and '8.8.8.8 -> blocked'"
+"$LEXOS" box-smoke --manifest demo/manifest.json --dwell "${DWELL:-12}" \
+  --jail-uid "$JAIL_UID" --jail-gid "$JAIL_GID"
