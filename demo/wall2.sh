@@ -34,7 +34,7 @@ echo "+ host check"
 bash demo/host-check.sh || { echo "wall2: host-check failed (need KVM + root + assets)" >&2; exit 1; }
 
 echo "+ build"
-"${CARGO[@]}" build --quiet --features firecracker -p lex-os
+"${CARGO[@]}" build --quiet -p lex-os
 [ -x "$LEXOS" ] || { echo "wall2: build produced no binary" >&2; exit 1; }
 
 echo "+ booting the JAILED box (uid=$JAIL_UID gid=$JAIL_GID) — watch for the guest console and '8.8.8.8 -> blocked'"

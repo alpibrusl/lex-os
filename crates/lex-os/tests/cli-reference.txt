@@ -13,6 +13,7 @@ Commands:
   audit       Audit-log utilities
   check       Type-check an agent Lex program against a manifest grant and refuse it if its effects exceed the grant — the type-check wall (demo Attempt 1), run *before* the program executes
   introspect  Emit the acli command tree for agent discovery
+  box-smoke   Standalone Wall-2 proof: boot a real Firecracker microVM with the host-side egress wall, dwell while the guest boots and runs `/sbin/init.demo` (the egress probes), then tear it down. Streams the guest console. Requires `--features firecracker`, a KVM host, and root
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -67,6 +68,9 @@ Options:
 
       --guest-script <GUEST_SCRIPT>
           Deterministic in-guest script for --agent guest (e.g. "reprovision-demo"), in place of the LLM loop. Used by demos that need a fixed sequence
+
+      --simulated
+          Use the in-process simulated perimeter instead of a real microVM. NOT a security boundary — for portability/tests/dev. Also via LEX_OS_SIMULATED=1. Without it, a non-KVM host refuses rather than silently downgrading
 
       --jail-uid <JAIL_UID>
           uid firecracker is dropped to under the jailer (e.g. the invoking user)

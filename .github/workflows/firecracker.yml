@@ -19,8 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build with the real perimeter
-        run: cargo build -p lex-os --features firecracker
+      - name: Build with the real perimeter (firecracker is the DEFAULT feature)
+        run: cargo build -p lex-os
       - name: Fetch microVM assets (firecracker + kernel + rootfs)
         run: sudo bash demo/setup-assets.sh
       - name: Wall 2 — kernel egress wall drops a non-allowlisted host

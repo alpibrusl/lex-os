@@ -64,10 +64,10 @@ if ! bash demo/host-check.sh; then
 fi
 
 say "Pre-flight: build"
-"${CARGO[@]}" build --quiet --features firecracker -p lex-os -p results-stub
+"${CARGO[@]}" build --quiet -p lex-os -p results-stub
 if [ ! -x "$LEXOS" ] || [ ! -x "$STUB" ]; then
   echo "demo: build did not produce the binaries; build as your user first:" >&2
-  echo "      cargo build --features firecracker -p lex-os -p results-stub" >&2
+  echo "      cargo build -p lex-os -p results-stub" >&2
   exit 1
 fi
 

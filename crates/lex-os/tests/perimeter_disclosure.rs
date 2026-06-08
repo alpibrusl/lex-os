@@ -3,10 +3,10 @@
 //! enforced behind — in machine output and with a loud human warning — so
 //! a portable, in-process run can't be confused with a sealed microVM.
 //!
-//! This binary is built without the `firecracker` feature (the default),
-//! so the perimeter is simulated and the disclosure must say so. The
-//! firecracker build flips `security_boundary` to true; that path needs a
-//! KVM host and is exercised by the KVM-gated CI workflow, not here.
+//! The real Firecracker box is now the default, so the simulator is an explicit
+//! `--simulated` opt-in. This test exercises that opt-in (no KVM needed) and
+//! asserts the disclosure still says "not a boundary". The real path flips
+//! `security_boundary` to true and is exercised by the KVM-gated CI workflow.
 
 use std::process::Command;
 
@@ -15,7 +15,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_lex-os");
 #[test]
 fn run_discloses_the_simulated_perimeter() {
     let out = Command::new(BIN)
-        .args(["--output", "json", "run"])
+        .args(["--output", "json", "run", "--simulated"])
         .output()
         .expect("spawn lex-os");
 
@@ -48,5 +48,35 @@ fn run_discloses_the_simulated_perimeter() {
     assert!(
         stdout.contains("\"outcome\": \"GoalMet\""),
         "demo should reach GoalMet:\n{stdout}"
+    );
+}
+
+/// Refuse, don't downgrade: where the real perimeter is unavailable, a bare
+/// `run` (no `--simulated`) must error and point at the opt-in — never silently
+/// fall back to a non-boundary. Only asserted when `/dev/kvm` is absent; on a
+/// KVM host the default `run` would try to boot a real box, which a unit test
+/// must not do.
+#[test]
+fn run_refuses_to_downgrade_without_an_explicit_opt_in() {
+    if std::path::Path::new("/dev/kvm").exists() {
+        return; // real perimeter available here — skip (don't boot a VM in a test)
+    }
+    let out = Command::new(BIN)
+        .args(["--output", "json", "run"])
+        .output()
+        .expect("spawn lex-os");
+
+    assert!(
+        !out.status.success(),
+        "without --simulated and no /dev/kvm, run must refuse rather than downgrade"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("--simulated"),
+        "the refusal must point the user at --simulated:\n{combined}"
     );
 }
