@@ -24,42 +24,82 @@ use serde_json::json;
 
 use lex_os_audit::AuditLog;
 use lex_os_manifest::Manifest;
+use lex_os_perimeter::{Perimeter, SimulatedPerimeter};
 #[cfg(feature = "firecracker")]
-use lex_os_perimeter::FirecrackerPerimeter;
-#[cfg(not(feature = "firecracker"))]
-use lex_os_perimeter::SimulatedPerimeter;
-#[cfg(not(feature = "firecracker"))]
+use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
 use lex_os_proto::transport::StreamTransport;
 use lex_os_resolver::{resolve, Environment};
 use lex_os_supervisor::{Limits, Supervisor, SystemClock};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Which perimeter backend this binary was built with, and whether it is a
-/// *real* security boundary. The selection is compile-time (the
-/// `firecracker` feature), but the runtime must never let the simulated
-/// perimeter be mistaken for the real one — so every `run` surfaces this
-/// in its output and warns loudly when the box is not actually sealed.
-#[cfg(feature = "firecracker")]
-const PERIMETER_BACKEND: &str = "firecracker";
-#[cfg(feature = "firecracker")]
-const PERIMETER_IS_SECURITY_BOUNDARY: bool = true;
-#[cfg(not(feature = "firecracker"))]
-const PERIMETER_BACKEND: &str = "simulated";
-#[cfg(not(feature = "firecracker"))]
-const PERIMETER_IS_SECURITY_BOUNDARY: bool = false;
+/// The perimeter backend chosen for a run, at *run time*. The real Firecracker
+/// box is the default; the simulator is an explicit opt-in. The runtime must
+/// never let the simulated perimeter be mistaken for the real one — so every
+/// `run` surfaces this in its output and warns loudly when not sealed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    /// A real, sealed microVM (Firecracker). `security_boundary: true`.
+    /// Unconstructable in a `--no-default-features` build (select_backend
+    /// refuses it), but the match arms still name it.
+    #[cfg_attr(not(feature = "firecracker"), allow(dead_code))]
+    Real,
+    /// The in-process simulator. NOT a security boundary.
+    Simulated,
+}
 
-/// Print a prominent warning to stderr when the run is *not* sealed by a
-/// real boundary. Goes to stderr so it never corrupts `--output json` on
-/// stdout. Returning the boundary status keeps callers honest about it.
-fn warn_if_not_sealed() {
-    if !PERIMETER_IS_SECURITY_BOUNDARY {
+impl Backend {
+    fn name(self) -> &'static str {
+        match self {
+            Backend::Real => "firecracker",
+            Backend::Simulated => "simulated",
+        }
+    }
+    fn is_security_boundary(self) -> bool {
+        matches!(self, Backend::Real)
+    }
+}
+
+/// Choose the perimeter backend, *refusing rather than silently downgrading*.
+/// The real box is the default; `--simulated` (or `LEX_OS_SIMULATED`) explicitly
+/// opts into the in-process simulator. Without that opt-in, a host that cannot
+/// run the real perimeter (no `/dev/kvm`, or a `--no-default-features` build) is
+/// an error — never a quiet fallback to a non-boundary.
+fn select_backend(simulated_flag: bool) -> Result<Backend, String> {
+    if simulated_flag || std::env::var_os("LEX_OS_SIMULATED").is_some() {
+        return Ok(Backend::Simulated);
+    }
+    #[cfg(feature = "firecracker")]
+    {
+        if std::path::Path::new("/dev/kvm").exists() {
+            Ok(Backend::Real)
+        } else {
+            Err("the real microVM perimeter is unavailable: no /dev/kvm on this host. \
+                 Re-run with --simulated to use the in-process simulator (NOT a security \
+                 boundary), or run on a KVM host."
+                .into())
+        }
+    }
+    #[cfg(not(feature = "firecracker"))]
+    {
+        Err("this binary was built without the firecracker backend \
+             (--no-default-features), so the real perimeter is unavailable. \
+             Re-run with --simulated to use the in-process simulator (NOT a security \
+             boundary)."
+            .into())
+    }
+}
+
+/// Print a prominent warning to stderr when the run is *not* sealed by a real
+/// boundary. Goes to stderr so it never corrupts `--output json` on stdout.
+fn warn_if_not_sealed(backend: Backend) {
+    if !backend.is_security_boundary() {
         eprintln!(
             "⚠  SIMULATED PERIMETER — this is NOT a security boundary. The box is \
              enforced in-process for portability and tests; an agent that ignores \
-             Lex is not actually contained. Build with `--features firecracker` on \
-             a KVM host for a real microVM boundary. (every run reports \
-             `security_boundary` in its output.)"
+             Lex is not actually contained. Run on a KVM host (the default is a real \
+             microVM) for a real boundary. (every run reports `security_boundary` in \
+             its output.)"
         );
     }
 }
@@ -146,6 +186,12 @@ enum Cmd {
         /// in place of the LLM loop. Used by demos that need a fixed sequence.
         #[arg(long)]
         guest_script: Option<String>,
+        /// Use the in-process simulated perimeter instead of a real microVM.
+        /// NOT a security boundary — for portability/tests/dev. Also via
+        /// LEX_OS_SIMULATED=1. Without it, a non-KVM host refuses rather than
+        /// silently downgrading.
+        #[arg(long)]
+        simulated: bool,
         #[command(flatten)]
         jail: JailArgs,
     },
@@ -289,6 +335,7 @@ fn main() {
             ollama_url,
             guest_bin,
             guest_script,
+            simulated,
             jail,
         } => cmd_run(
             &fmt,
@@ -301,6 +348,7 @@ fn main() {
             ollama_url,
             guest_bin,
             guest_script,
+            simulated,
             jail,
         ),
         Cmd::Resolve {
@@ -358,15 +406,19 @@ fn cmd_run(
     ollama_url: Option<String>,
     guest_bin: Option<PathBuf>,
     guest_script: Option<String>,
+    simulated: bool,
     jail: JailArgs,
 ) -> ExitCode {
-    let _ = &jail; // consumed only by the firecracker guest path below
+    let _ = &jail; // consumed only by the firecracker paths below
     let start = Instant::now();
 
-    // Before anything runs, make the boundary unmistakable: if this isn't a
-    // real perimeter, say so loudly. The "sealed at the edge" promise is void
-    // under the simulator, and a silent simulator is the dangerous failure.
-    warn_if_not_sealed();
+    // Pick the backend up front, refusing rather than silently downgrading.
+    // Then make the boundary unmistakable: if it isn't real, say so loudly.
+    let backend = match select_backend(simulated) {
+        Ok(b) => b,
+        Err(e) => return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e),
+    };
+    warn_if_not_sealed(backend);
 
     // For LLM agents use a goal that motivates the three attacks naturally;
     // the scripted demo keeps its own manifest.
@@ -389,25 +441,21 @@ fn cmd_run(
     let env = environment(namespaces_only, offline);
     let registry = demo::demo_registry();
 
-    #[cfg(feature = "firecracker")]
+    // Build the supervisor with the runtime-selected backend. `Box<dyn
+    // Perimeter>` keeps the supervisor generic while the concrete box is chosen
+    // at run time. The real backend is jailed when --jail-uid/--jail-gid are set.
     let make_supervisor = |m: Manifest| {
-        Supervisor::new(
-            m,
-            registry,
-            FirecrackerPerimeter::new(),
-            SystemClock,
-            Limits::default(),
-        )
-    };
-    #[cfg(not(feature = "firecracker"))]
-    let make_supervisor = |m: Manifest| {
-        Supervisor::new(
-            m,
-            registry,
-            SimulatedPerimeter::new(),
-            SystemClock,
-            Limits::default(),
-        )
+        let p: Box<dyn Perimeter> = match backend {
+            Backend::Simulated => Box::new(SimulatedPerimeter::new()),
+            #[cfg(feature = "firecracker")]
+            Backend::Real => Box::new(FirecrackerPerimeter::with_assets(FirecrackerAssets {
+                jail: jail.to_config(),
+                ..FirecrackerAssets::default()
+            })),
+            #[cfg(not(feature = "firecracker"))]
+            Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
+        };
+        Supervisor::new(m, registry, p, SystemClock, Limits::default())
     };
 
     // Commands exposed to the LLM agent (names only, for the system prompt).
@@ -490,32 +538,35 @@ fn cmd_run(
             }
         }
         AgentBackend::Guest => {
-            // With --features firecracker the guest runs INSIDE the microVM and
-            // talks to the supervisor over vsock; otherwise it's a host
-            // subprocess over stdio (same binary, same protocol).
-            #[cfg(feature = "firecracker")]
-            let res = {
-                let _ = guest_bin; // not used for the in-VM path
-                run_guest_in_vm(
+            // Real backend → the guest runs INSIDE the microVM over vsock.
+            // Simulated → a host subprocess over stdio (same binary, same
+            // protocol). Selected at run time, matching the chosen perimeter.
+            let res = match backend {
+                #[cfg(feature = "firecracker")]
+                Backend::Real => {
+                    let _ = guest_bin; // not used for the in-VM path
+                    run_guest_in_vm(
+                        fmt,
+                        manifest.clone(),
+                        &env,
+                        model,
+                        ollama_url,
+                        guest_script,
+                        jail.to_config(),
+                    )
+                }
+                Backend::Simulated => run_guest_subprocess(
                     fmt,
                     manifest.clone(),
                     &env,
                     model,
                     ollama_url,
+                    guest_bin,
                     guest_script,
-                    jail.to_config(),
-                )
+                ),
+                #[cfg(not(feature = "firecracker"))]
+                Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
             };
-            #[cfg(not(feature = "firecracker"))]
-            let res = run_guest_subprocess(
-                fmt,
-                manifest.clone(),
-                &env,
-                model,
-                ollama_url,
-                guest_bin,
-                guest_script,
-            );
             match res {
                 Ok(r) => r,
                 Err(e) => {
@@ -537,8 +588,8 @@ fn cmd_run(
         "grant": manifest.grant.pretty(),
         // The boundary the run was actually enforced behind. `false` means
         // the simulated perimeter — useful output, never a security claim.
-        "perimeter": PERIMETER_BACKEND,
-        "security_boundary": PERIMETER_IS_SECURITY_BOUNDARY,
+        "perimeter": backend.name(),
+        "security_boundary": backend.is_security_boundary(),
         "outcome": format!("{:?}", report.outcome),
         "reprovisions": report.reprovisions,
         "commands_used": report.ledger.commands_used(),
@@ -715,10 +766,11 @@ fn run_guest_in_vm(
 /// Spawn `lex-os-guest` as a subprocess and drive the supervisor loop over
 /// its stdin/stdout. This is the macOS / no-Firecracker development path: same
 /// protocol as the real vsock channel, same guest binary, no Firecracker.
-#[cfg(not(feature = "firecracker"))]
 ///
 /// The guest binary reads its model from `OLLAMA_MODEL` and the Ollama host
-/// from `OLLAMA_HOST`. On macOS it defaults to `localhost:11434`.
+/// from `OLLAMA_HOST`. On macOS it defaults to `localhost:11434`. This is the
+/// `--simulated` guest path: the in-process [`SimulatedPerimeter`] (NOT a
+/// security boundary) drives the same protocol as the real vsock channel.
 fn run_guest_subprocess(
     _fmt: &OutputFormat,
     manifest: Manifest,
@@ -728,10 +780,6 @@ fn run_guest_subprocess(
     guest_bin: Option<PathBuf>,
     guest_script: Option<String>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
-    #[cfg(feature = "firecracker")]
-    use lex_os_perimeter::FirecrackerPerimeter;
-    #[cfg(not(feature = "firecracker"))]
-    use lex_os_perimeter::SimulatedPerimeter;
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
     use std::io::BufReader;
     use std::process::{Command, Stdio};
@@ -777,15 +825,6 @@ fn run_guest_subprocess(
     let stdout = child.stdout.take().expect("piped stdout");
     let transport = StreamTransport::new(BufReader::new(stdout), stdin);
 
-    #[cfg(feature = "firecracker")]
-    let supervisor = Supervisor::new(
-        manifest.clone(),
-        demo::demo_registry(),
-        FirecrackerPerimeter::new(),
-        SystemClock,
-        Limits::default(),
-    );
-    #[cfg(not(feature = "firecracker"))]
     let supervisor = Supervisor::new(
         manifest.clone(),
         demo::demo_registry(),
