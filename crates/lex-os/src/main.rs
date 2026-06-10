@@ -14,6 +14,7 @@
 mod agent;
 mod capsule;
 mod demo;
+mod inbox;
 
 use std::path::PathBuf;
 use std::time::Instant;

@@ -47,6 +47,10 @@ lex-types = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725
 # wall (the agent's code is checked before it runs).
 lex-syntax = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725681208a865489e82b061777bc60d" }
 lex-ast = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725681208a865489e82b061777bc60d" }
+# The bytecode VM: interpret a capsule's entrypoint in-box and route every
+# effect through the supervisor's mediation gate (EffectHandler trait). Pinned
+# to the same rev as the rest of the lex-lang chain.
+lex-bytecode = { git = "https://github.com/alpibrusl/lex-lang", rev = "ddfd7b78c725681208a865489e82b061777bc60d" }
 # acli (Agent-friendly CLI) standard — the binary speaks it so an agent can
 # discover lex-os the same way it discovers any other tool.
 acli = { git = "https://github.com/alpibrusl/acli", tag = "v0.5.0" }

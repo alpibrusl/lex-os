@@ -142,12 +142,14 @@ fn accepted_install_writes_a_verifiable_log() {
 fn install_run_executes_the_packages_entrypoint() {
     let s = Scratch::new("run");
     let secret = keygen(&"ac".repeat(32));
-    // A real package whose entrypoint declares [net] — within the read-only +
-    // allowlist effective grant.
+    // A real package whose `main` entrypoint declares [net] — within the
+    // read-only + allowlist effective grant. Real in-box execution calls
+    // `main`, so the entrypoint is a zero-arg function that performs the net
+    // effect itself.
     let artifact = s.path("pdf-extract.tgz");
     make_package(
         &artifact,
-        "import \"std.net\" as net\nfn run(u :: Str) -> [net] Result[Str, Str] { net.get(u) }\n",
+        "import \"std.net\" as net\nfn main() -> [net] Result[Str, Str] { net.get(\"https://results.demo.internal/x\") }\n",
     );
     let contract = s.path("contract.json");
     let log = s.path("run.audit.json");
@@ -186,10 +188,14 @@ fn install_run_executes_the_packages_entrypoint() {
         code, 0,
         "install --run should reach a terminal outcome and exit 0"
     );
-    // The entrypoint's real declared effects drove the workload.
+    // The entrypoint was interpreted in-box; the net effect it actually
+    // performed drove the mediation.
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["data"]["entrypoint"], "src/main.lex");
-    assert_eq!(v["data"]["workload"][0], "net.fetch");
+    assert_eq!(v["data"]["execution"], "in-box (lex-bytecode interpreter)");
+    assert_eq!(v["data"]["run_ok"], true);
+    // The effect the code performed, in execution order.
+    assert_eq!(v["data"]["effects_performed"][0], "net.get");
 
     let audit = AuditLog::from_json(&std::fs::read_to_string(&log).unwrap()).unwrap();
     assert!(
@@ -204,7 +210,7 @@ fn install_run_executes_the_packages_entrypoint() {
     );
     assert!(
         nd.contains("net.fetch"),
-        "the entrypoint's net effect was mediated"
+        "the entrypoint's net effect was mediated through the gate"
     );
     assert!(
         nd.contains("session_ended"),

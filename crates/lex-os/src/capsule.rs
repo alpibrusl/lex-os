@@ -33,7 +33,7 @@ use lex_os_capsule::{
 use lex_os_manifest::Manifest;
 use lex_os_perimeter::{Perimeter, SandboxPolicy, SimulatedPerimeter};
 use lex_os_resolver::{resolve, Environment};
-use lex_os_supervisor::{Agent, AgentAction, AgentView, Limits, Supervisor, SystemClock};
+use lex_os_supervisor::SystemClock;
 
 use crate::demo::demo_registry;
 use crate::{emit_err, environment, VERSION};
@@ -476,20 +476,16 @@ fn install(
         // The type-check wall, now on the distributed package's own code: its
         // declared effects must fit the box's least authority, or it is refused
         // before anything runs.
-        let report = match lex_os_check::check_source_against_manifest(&source, &installed.manifest)
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return refuse_install(
-                    audit,
-                    &audit_out,
-                    fmt,
-                    &label,
-                    ExitCode::PreconditionFailed,
-                    format!("entrypoint `{ep}` exceeds the effective grant: {e}"),
-                )
-            }
-        };
+        if let Err(e) = lex_os_check::check_source_against_manifest(&source, &installed.manifest) {
+            return refuse_install(
+                audit,
+                &audit_out,
+                fmt,
+                &label,
+                ExitCode::PreconditionFailed,
+                format!("entrypoint `{ep}` exceeds the effective grant: {e}"),
+            );
+        }
         // Past every gate: the install is accepted; this entry seeds the chain
         // the session continues.
         audit.append(Event::CapsuleInstalled {
@@ -498,8 +494,10 @@ fn install(
             content_hash: installed.artifact.content_hash.clone(),
             effective_grant: installed.effective_grant.pretty(),
         });
-        let workload = commands_for_effects(&report.effects);
-        return run_under_supervisor(
+        // Real in-box execution: interpret the entrypoint and mediate every
+        // effect it performs through the supervisor gate (not a stand-in built
+        // from the declared effects).
+        return run_in_box(
             fmt,
             start,
             &installed,
@@ -508,8 +506,7 @@ fn install(
             audit,
             &audit_out,
             ep,
-            report.effects,
-            workload,
+            &source,
         );
     }
 
@@ -592,13 +589,15 @@ fn write_audit(audit: &AuditLog, out: &Option<PathBuf>) {
     }
 }
 
-/// Run the package's entrypoint under the installed capsule's effective
-/// manifest via the supervisor loop, continuing the install audit log. The
-/// `workload` is derived from the entrypoint's type-checked effects, so the
-/// session exercises exactly the capabilities the package declared — mediated,
-/// and chained onto the install decision.
+/// Run the package's entrypoint **in-box**: interpret it with the lex-bytecode
+/// VM and route every effect it performs through the supervisor's mediation
+/// gate, continuing the install audit log. Unlike the declared-effect stand-in
+/// it replaces, this executes the real control flow, so the session reflects
+/// exactly what the code *does* — each consequential effect gated at the edge,
+/// a denial surfaced to the program as an error, and the whole thing chained
+/// onto the install decision as one tamper-evident record.
 #[allow(clippy::too_many_arguments)]
-fn run_under_supervisor(
+fn run_in_box(
     fmt: &OutputFormat,
     start: Instant,
     installed: &InstalledCapsule,
@@ -607,36 +606,76 @@ fn run_under_supervisor(
     audit: AuditLog,
     audit_out: &Option<PathBuf>,
     entrypoint: &str,
-    effects: Vec<String>,
-    workload: Vec<String>,
+    source: &str,
 ) -> ExitCode {
-    let supervisor = Supervisor::new(
-        installed.manifest.clone(),
-        demo_registry(),
-        SimulatedPerimeter::new(),
-        SystemClock,
-        Limits::default(),
-    )
-    // Continue the install decision's log so install + session are one chain.
-    .with_seed_audit(audit);
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use lex_os_supervisor::{BudgetLedger, Clock};
 
-    let mut agent = CapsuleWorkload::from_commands(workload.clone());
-    let report = match supervisor.run(env, &mut agent) {
-        Ok(r) => r,
+    // Resolve + provision the (simulated) box from the effective manifest, the
+    // same shape `run_under_supervisor` did, so the perimeter capability gate
+    // is live before the first effect.
+    if let Err(e) = resolve(&installed.manifest, env) {
+        return emit_err(fmt, "capsule.install", ExitCode::PreconditionFailed, &e.to_string());
+    }
+    let policy = SandboxPolicy::from_manifest(&installed.manifest);
+    let mut perimeter = SimulatedPerimeter::new();
+    if let Err(e) = perimeter.provision(policy) {
+        return emit_err(fmt, "capsule.install", ExitCode::PreconditionFailed, &e.to_string());
+    }
+    let mut audit = audit;
+    audit.append(Event::Provisioned {
+        manifest_id: installed.manifest.content_id().0,
+        backend: perimeter.backend_name().to_string(),
+        reprovision: false,
+    });
+
+    // Compile the entrypoint (already type-checked against the grant above).
+    let program = match lex_syntax::parse_source(source) {
+        Ok(p) => p,
         Err(e) => {
             return emit_err(
                 fmt,
                 "capsule.install",
                 ExitCode::PreconditionFailed,
-                &e.to_string(),
+                &format!("entrypoint parse error: {e:?}"),
             )
         }
     };
-    write_audit(&report.audit, audit_out);
+    let stages = lex_ast::canonicalize_program(&program);
+    let bytecode = std::sync::Arc::new(lex_bytecode::compile_program(&stages));
+
+    // Mediated execution: the handler routes every effect through the same gate
+    // the supervisor loop uses, sharing the seeded audit chain + budget ledger.
+    let clock = SystemClock;
+    let ledger = BudgetLedger::new(installed.manifest.budget, clock.now_secs());
+    let state = Rc::new(RefCell::new(crate::inbox::MediationState {
+        audit,
+        ledger,
+        performed: Vec::new(),
+    }));
+    let handler =
+        crate::inbox::MediatingHandler::new(demo_registry(), perimeter, Rc::clone(&state));
+    let mut vm = lex_bytecode::vm::Vm::with_handler(&bytecode, Box::new(handler));
+    let run_result = vm.call("main", Vec::new());
+    drop(vm); // release the handler's Rc clone so we hold the only reference
+
+    let mut st = state.borrow_mut();
+    let (run_ok, run_detail) = match &run_result {
+        Ok(_) => (true, "entrypoint returned".to_string()),
+        // A denied effect (or any runtime error) halts the box — the program
+        // saw the refusal, exactly as a sealed syscall would fail.
+        Err(e) => (false, e.to_string()),
+    };
+    st.audit.append(Event::SessionEnded {
+        outcome: if run_ok { "goal_met".into() } else { "halted".into() },
+    });
+    write_audit(&st.audit, audit_out);
 
     let data = json!({
         "installed": true,
         "ran": true,
+        "execution": "in-box (lex-bytecode interpreter)",
         "artifact": format!("{}@{}", installed.artifact.name, installed.artifact.version),
         "signer": installed.signer,
         "consumer_grant": consumer.grant.pretty(),
@@ -644,18 +683,16 @@ fn run_under_supervisor(
         "effective_egress": installed.manifest.egress,
         "perimeter": "simulated",
         "security_boundary": false,
-        // The entrypoint that actually ran, type-checked against the grant.
         "entrypoint": entrypoint,
-        "entrypoint_effects": effects,
-        "workload": workload,
-        // The session the effective grant governed.
-        "outcome": format!("{:?}", report.outcome),
-        "commands_used": report.ledger.commands_used(),
-        "reprovisions": report.reprovisions,
+        // The effects the entrypoint *actually performed*, in execution order.
+        "effects_performed": st.performed,
+        "run_ok": run_ok,
+        "run_detail": run_detail,
+        "commands_used": st.ledger.commands_used(),
         // One continuous, tamper-evident chain: install decision → session.
-        "audit_entries": report.audit.len(),
-        "audit_head": report.audit.head(),
-        "audit_verified": report.audit.verify().is_ok(),
+        "audit_entries": st.audit.len(),
+        "audit_head": st.audit.head(),
+        "audit_verified": st.audit.verify().is_ok(),
         "audit_out": audit_out.as_ref().map(|p| p.display().to_string()),
     });
     emit(
@@ -690,56 +727,6 @@ fn extract_text_from_targz(bytes: &[u8], name: &str) -> Result<String, String> {
         }
     }
     Err(format!("package has no entrypoint at `{name}`"))
-}
-
-/// Map an entrypoint's declared effects to the mediated commands that exercise
-/// them, so the session reflects what the package actually does. Effects with
-/// no consequential reach (io, time, …) mediate to nothing.
-fn commands_for_effects(effects: &[String]) -> Vec<String> {
-    let mut cmds: Vec<String> = Vec::new();
-    for e in effects {
-        let cmd = match e.as_str() {
-            "fs_read" | "fs_walk" => "fs.read",
-            "fs_write" => "fs.write",
-            "net" | "http" | "mcp" | "llm_cloud" => "net.fetch",
-            "proc" => "exec.shell",
-            _ => continue,
-        };
-        if !cmds.iter().any(|c| c == cmd) {
-            cmds.push(cmd.to_string());
-        }
-    }
-    cmds
-}
-
-/// The workload that runs the package's declared operations: one mediated
-/// command per capability the type-checked entrypoint uses, then done. It is a
-/// faithful stand-in for executing the entrypoint — lex-os mediates the
-/// capabilities it declared; in-box Lex interpretation (lex-runtime) or a real
-/// rootfs+exec under Firecracker is the next step.
-struct CapsuleWorkload {
-    plan: Vec<AgentAction>,
-    idx: usize,
-}
-
-impl CapsuleWorkload {
-    fn from_commands(commands: Vec<String>) -> Self {
-        let mut plan: Vec<AgentAction> = commands.into_iter().map(AgentAction::Run).collect();
-        plan.push(AgentAction::Done);
-        Self { plan, idx: 0 }
-    }
-}
-
-impl Agent for CapsuleWorkload {
-    fn next_action(&mut self, _view: &AgentView) -> AgentAction {
-        let action = self
-            .plan
-            .get(self.idx)
-            .cloned()
-            .unwrap_or(AgentAction::Done);
-        self.idx += 1;
-        action
-    }
 }
 
 fn decode_seed(s: &str) -> Result<[u8; 32], String> {
