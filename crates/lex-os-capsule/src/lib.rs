@@ -168,6 +168,32 @@ impl CapabilityContract {
             contract: self,
         }
     }
+
+    /// SHA-256 of an artifact archive as lowercase hex — the value the
+    /// [`ArtifactRef::content_hash`] field is expected to hold. Use it to
+    /// compute the hash at publish time (`capsule sign --artifact-file`).
+    pub fn hash_artifact_bytes(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hex::encode(hasher.finalize())
+    }
+
+    /// Check that `bytes` are the artifact this contract was signed over:
+    /// their SHA-256 must equal `artifact.content_hash`. This closes the loop
+    /// the signature only *promises* — the signature binds the contract (and
+    /// thus the declared hash) to the publisher, but nothing forces the bytes
+    /// you actually run to match that hash unless you call this.
+    pub fn matches_artifact(&self, bytes: &[u8]) -> Result<(), CapsuleError> {
+        let actual = Self::hash_artifact_bytes(bytes);
+        if actual.eq_ignore_ascii_case(&self.artifact.content_hash) {
+            Ok(())
+        } else {
+            Err(CapsuleError::ArtifactHashMismatch {
+                expected: self.artifact.content_hash.clone(),
+                actual,
+            })
+        }
+    }
 }
 
 /// A capability contract plus the publisher's Ed25519 signature over its
@@ -187,8 +213,8 @@ pub struct SignedContract {
 impl SignedContract {
     /// Verify the signature binds *this* contract to the declared signer
     /// key. Returns the verified [`VerifyingKey`] on success so the caller
-    /// can decide, separately, whether that *key* is trusted (a key-trust
-    /// policy is an open question on lex-os#34 — out of scope here).
+    /// can decide, separately, whether that *key* is trusted — see
+    /// [`Keyring`] for the trusted-signer policy.
     pub fn verify(&self) -> Result<VerifyingKey, CapsuleError> {
         let key_bytes: [u8; 32] = decode_fixed(&self.signer, "signer public key")?;
         let sig_bytes: [u8; 64] = decode_fixed(&self.signature, "signature")?;
@@ -206,6 +232,59 @@ impl SignedContract {
     pub fn from_json(s: &str) -> Result<SignedContract, CapsuleError> {
         Ok(serde_json::from_str(s)?)
     }
+}
+
+/// A consumer's set of trusted publisher public keys (hex Ed25519). A valid
+/// signature proves *who* signed a contract; the keyring decides whether that
+/// signer is *allowed*. Without one, any valid signature is accepted —
+/// trust-on-first-use, which the CLI warns about.
+///
+/// This is deliberately the simplest trust policy: an explicit allowlist of
+/// keys. Earning trust from a publisher's track record (tying the signer into
+/// lex-lang's `ProducerTrust` attestation scoring) is the richer follow-up on
+/// lex-os#34; a keyring is the floor under it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Keyring {
+    /// Trusted signer public keys, hex-encoded (32-byte Ed25519).
+    pub trusted: Vec<String>,
+}
+
+impl Keyring {
+    pub fn new(keys: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            trusted: keys.into_iter().collect(),
+        }
+    }
+
+    /// Is `key` trusted? Compared by canonical hex, case-insensitively.
+    pub fn trusts(&self, key: &VerifyingKey) -> bool {
+        let hex_key = hex::encode(key.to_bytes());
+        self.trusted
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(&hex_key))
+    }
+
+    pub fn from_json(s: &str) -> Result<Keyring, CapsuleError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    pub fn to_json(&self) -> Result<String, CapsuleError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+}
+
+/// Options narrowing how a capsule is installed: optional artifact-byte
+/// integrity and an optional trusted-signer keyring. Both default to *off*
+/// (unverified bytes, trust-on-first-use) so [`Capsule::install`] stays the
+/// simplest call; the CLI surfaces both and warns when either is skipped.
+#[derive(Default)]
+pub struct InstallOptions<'a> {
+    /// The artifact archive bytes. When present, their SHA-256 must equal the
+    /// contract's `content_hash` or install is refused.
+    pub artifact_bytes: Option<&'a [u8]>,
+    /// Trusted publisher keyring. When present, the verified signer must be in
+    /// it or install is refused.
+    pub keyring: Option<&'a Keyring>,
 }
 
 /// The result of installing a capsule against a consumer manifest: the
@@ -239,6 +318,16 @@ pub enum CapsuleError {
         field: &'static str,
         expected: usize,
     },
+    /// The supplied artifact bytes are not the ones the contract was signed
+    /// over — a substituted or corrupted archive.
+    #[error(
+        "artifact bytes do not match the contract: content_hash is {expected} but the supplied bytes hash to {actual}"
+    )]
+    ArtifactHashMismatch { expected: String, actual: String },
+    /// The signature is valid, but the signer is not in the consumer's
+    /// trusted keyring — a real but unauthorized publisher.
+    #[error("signer {signer} is not in the consumer's trusted keyring")]
+    UntrustedSigner { signer: String },
     /// The artifact declared it needs more authority than the consumer
     /// grants. Refuse, don't downgrade: the wrapped [`ManifestError`] names
     /// the exact widening (a grant dimension, an egress host, …).
@@ -264,29 +353,62 @@ fn decode_fixed<const N: usize>(s: &str, field: &'static str) -> Result<[u8; N],
 pub struct Capsule;
 
 impl Capsule {
-    /// Install `signed` against `consumer`, producing the effective box to
-    /// provision. Steps, in order:
-    ///
-    /// 1. **Authenticity.** The signature must verify for the declared key,
-    ///    binding the contract to its artifact. (Whether the *key* is
-    ///    trusted is the caller's policy — see [`SignedContract::verify`].)
-    /// 2. **Refuse, don't downgrade.** The artifact's declared requirement
-    ///    must *narrow* the consumer's manifest on every dimension (grant +
-    ///    egress). Any widening is [`CapsuleError::Refused`], not a silent
-    ///    clamp. Budgets stay the consumer's ceiling.
-    /// 3. **Least authority.** The effective grant is
-    ///    `meet(consumer, requires)` (== `requires` here, always ≤ consumer),
-    ///    and egress is the artifact's declared subset — the box gets only
-    ///    what the artifact said it needs, never the consumer's full grant.
+    /// Install `signed` against `consumer` with default options (unverified
+    /// artifact bytes, trust-on-first-use). See [`Capsule::install_with`] for
+    /// the full gate set; this is the simplest call.
     pub fn install(
         consumer: &Manifest,
         signed: &SignedContract,
+    ) -> Result<InstalledCapsule, CapsuleError> {
+        Self::install_with(consumer, signed, &InstallOptions::default())
+    }
+
+    /// Install `signed` against `consumer`, producing the effective box to
+    /// provision. Gates, in order — each a hard refusal, never a silent
+    /// downgrade:
+    ///
+    /// 1. **Authenticity.** The signature must verify for the declared key.
+    /// 2. **Authorization.** If `opts.keyring` is set, the verified signer
+    ///    must be in it ([`CapsuleError::UntrustedSigner`]).
+    /// 3. **Integrity.** If `opts.artifact_bytes` is set, their SHA-256 must
+    ///    equal the contract's `content_hash`
+    ///    ([`CapsuleError::ArtifactHashMismatch`]) — the bytes you run are the
+    ///    bytes that were signed.
+    /// 4. **Refuse, don't downgrade.** The artifact's declared requirement
+    ///    must *narrow* the consumer's manifest on every dimension (grant +
+    ///    egress). Any widening is [`CapsuleError::Refused`]. Budgets stay the
+    ///    consumer's ceiling.
+    /// 5. **Least authority.** The effective grant is
+    ///    `meet(consumer, requires)` (== `requires` here, always ≤ consumer),
+    ///    and egress is the artifact's declared subset — the box gets only
+    ///    what the artifact said it needs, never the consumer's full grant.
+    pub fn install_with(
+        consumer: &Manifest,
+        signed: &SignedContract,
+        opts: &InstallOptions<'_>,
     ) -> Result<InstalledCapsule, CapsuleError> {
         // (1) Authenticity first — never reason about an unverified contract.
         let key = signed.verify()?;
         let contract = &signed.contract;
 
-        // (2) Refuse, don't downgrade. Model the artifact's ask as a child
+        // (2) Authorization: is this publisher trusted at all? Checked before
+        //     any capability reasoning, so an untrusted signer is refused even
+        //     when its declared grant would fit.
+        if let Some(keyring) = opts.keyring {
+            if !keyring.trusts(&key) {
+                return Err(CapsuleError::UntrustedSigner {
+                    signer: hex::encode(key.to_bytes()),
+                });
+            }
+        }
+
+        // (3) Integrity: are these the bytes that were signed? Closes the loop
+        //     the signature only promised about `content_hash`.
+        if let Some(bytes) = opts.artifact_bytes {
+            contract.matches_artifact(bytes)?;
+        }
+
+        // (4) Refuse, don't downgrade. Model the artifact's ask as a child
         //     manifest (its required grant + egress, the consumer's budget so
         //     budgets trivially pass) and demand it narrows the consumer.
         //     This reuses the tested narrowing invariant verbatim.
@@ -294,8 +416,8 @@ impl Capsule {
             .with_egress(contract.egress.clone());
         Manifest::validate_narrowing(consumer, &requested).map_err(CapsuleError::Refused)?;
 
-        // (3) Effective grant, stated as the design's rule literally. Because
-        //     step (2) proved `requires ≤ consumer`, the meet equals
+        // (5) Effective grant, stated as the design's rule literally. Because
+        //     step (4) proved `requires ≤ consumer`, the meet equals
         //     `requires`; we assert that so the two formulations can never
         //     silently diverge.
         let effective_grant = consumer.grant.meet(&contract.requires);
@@ -478,6 +600,95 @@ mod tests {
         );
         assert_eq!(c1.content_id(), c2.content_id());
         assert_eq!(c1.content_id().0.len(), 64);
+    }
+
+    #[test]
+    fn artifact_hash_matches_real_bytes_and_rejects_substitution() {
+        let bytes = b"the published pdf-extract archive";
+        let hash = CapabilityContract::hash_artifact_bytes(bytes);
+        let contract = CapabilityContract::new(
+            ArtifactRef::new("pdf-extract", "2.0.0", hash),
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+        );
+        // The genuine bytes match.
+        assert!(contract.matches_artifact(bytes).is_ok());
+        // A substituted archive (even one byte off) is rejected.
+        assert!(matches!(
+            contract
+                .matches_artifact(b"a different archive")
+                .unwrap_err(),
+            CapsuleError::ArtifactHashMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn install_with_bytes_refuses_a_substituted_artifact() {
+        let real = b"genuine bytes";
+        let signed = CapabilityContract::new(
+            ArtifactRef::new(
+                "pdf-extract",
+                "2.0.0",
+                CapabilityContract::hash_artifact_bytes(real),
+            ),
+            Grant::new(Level::ReadOnly, Level::Allowlist, Level::None),
+        )
+        .with_egress(vec!["api.weather.example".into()])
+        .sign(&key());
+
+        // Right bytes install; wrong bytes are refused even though the
+        // signature and the capability are both fine.
+        let ok = InstallOptions {
+            artifact_bytes: Some(real),
+            keyring: None,
+        };
+        assert!(Capsule::install_with(&consumer(), &signed, &ok).is_ok());
+        let tampered = InstallOptions {
+            artifact_bytes: Some(b"swapped payload"),
+            keyring: None,
+        };
+        assert!(matches!(
+            Capsule::install_with(&consumer(), &signed, &tampered).unwrap_err(),
+            CapsuleError::ArtifactHashMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn keyring_gates_unknown_publishers() {
+        let signed = CapabilityContract::new(
+            artifact(),
+            Grant::new(Level::ReadOnly, Level::Allowlist, Level::None),
+        )
+        .with_egress(vec!["api.weather.example".into()])
+        .sign(&key());
+        let signer_hex = hex::encode(key().verifying_key().to_bytes());
+
+        // A keyring that trusts the signer: install proceeds.
+        let trusting = Keyring::new([signer_hex]);
+        let ok = InstallOptions {
+            artifact_bytes: None,
+            keyring: Some(&trusting),
+        };
+        assert!(Capsule::install_with(&consumer(), &signed, &ok).is_ok());
+
+        // A keyring that trusts only some *other* key: refused as untrusted,
+        // even though the signature is valid and the capability would fit.
+        let other = hex::encode(signing_key_from_seed(&[1u8; 32]).verifying_key().to_bytes());
+        let stranger = Keyring::new([other]);
+        let no = InstallOptions {
+            artifact_bytes: None,
+            keyring: Some(&stranger),
+        };
+        assert!(matches!(
+            Capsule::install_with(&consumer(), &signed, &no).unwrap_err(),
+            CapsuleError::UntrustedSigner { .. }
+        ));
+    }
+
+    #[test]
+    fn keyring_roundtrips_through_json() {
+        let kr = Keyring::new(["aa".repeat(32), "bb".repeat(32)]);
+        let back = Keyring::from_json(&kr.to_json().unwrap()).unwrap();
+        assert_eq!(kr, back);
     }
 
     #[test]
