@@ -84,6 +84,24 @@ for line in sys.stdin:
 verified=$("$LEXOS" --output json audit verify --log "$WORK/install.audit.json" | field verified)
 note "hash chain verifies: $verified  (an agent editing this log breaks the chain)"
 
+say "Consumer side — run a workload under the effective grant (--run)"
+note "The effective grant (fs=read-only) now governs a live session: reads and the"
+note "allowlisted fetch are allowed, but a write is denied — at runtime, mid-session."
+"$LEXOS" --output json capsule install \
+  --consumer examples/capsule-consumer.json \
+  --contract "$WORK/pdf-extract.contract.json" \
+  --artifact "$WORK/pdf-extract-2.0.0.tar" \
+  --trusted-keys "$WORK/keyring.json" \
+  --audit-out "$WORK/run.audit.json" --run 2>/dev/null > "$WORK/ran.json"
+note "outcome: $(field outcome < "$WORK/ran.json")  | commands run: $(field commands_used < "$WORK/ran.json")  | one chain of $(field audit_entries < "$WORK/ran.json") entries, verified: $(field audit_verified < "$WORK/ran.json")"
+"$LEXOS" audit render --log "$WORK/run.audit.json" | python3 -c '
+import sys, json
+for line in sys.stdin:
+    e = json.loads(line)["event"]
+    detail = e.get("command") or e.get("outcome") or ""
+    denied = " (DENIED)" if e["kind"] == "command_denied" else ""
+    print("    -", e["kind"], ("· " + detail) if detail else "", denied)'
+
 refuse() { # <label> <file-with-error-envelope>
   note "refused: $(field message < "$2")"
 }

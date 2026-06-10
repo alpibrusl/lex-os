@@ -28,12 +28,14 @@ use serde_json::json;
 use lex_os_audit::{AuditLog, Event};
 use lex_os_capsule::{
     generate_signing_key, signing_key_from_seed, ArtifactRef, CapabilityContract, Capsule,
-    CapsuleError, InstallOptions, Keyring, SignedContract,
+    CapsuleError, InstallOptions, InstalledCapsule, Keyring, SignedContract,
 };
 use lex_os_manifest::Manifest;
 use lex_os_perimeter::{Perimeter, SandboxPolicy, SimulatedPerimeter};
-use lex_os_resolver::resolve;
+use lex_os_resolver::{resolve, Environment};
+use lex_os_supervisor::{Agent, AgentAction, AgentView, Limits, Supervisor, SystemClock};
 
+use crate::demo::demo_registry;
 use crate::{emit_err, environment, VERSION};
 
 #[derive(Subcommand)]
@@ -99,9 +101,16 @@ pub enum CapsuleCmd {
         #[arg(long)]
         trusted_keys: Option<PathBuf>,
         /// Write a tamper-evident audit log of the install decision (request →
-        /// installed/refused) here. Verify it with `lex-os audit verify`.
+        /// installed/refused, plus the session under `--run`) here. Verify it
+        /// with `lex-os audit verify`.
         #[arg(long)]
         audit_out: Option<PathBuf>,
+        /// After installing, run a workload under the effective manifest via
+        /// the supervisor mediation loop — proving the effective grant governs
+        /// the session (commands beyond it are denied). One audit chain spans
+        /// the install decision and the session it authorized.
+        #[arg(long)]
+        run: bool,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -137,6 +146,7 @@ pub fn cmd_capsule(fmt: &OutputFormat, what: CapsuleCmd) -> ExitCode {
             artifact,
             trusted_keys,
             audit_out,
+            run,
             namespaces_only,
             offline,
         } => install(
@@ -146,6 +156,7 @@ pub fn cmd_capsule(fmt: &OutputFormat, what: CapsuleCmd) -> ExitCode {
             artifact,
             trusted_keys,
             audit_out,
+            run,
             namespaces_only,
             offline,
         ),
@@ -305,6 +316,7 @@ fn install(
     artifact: Option<PathBuf>,
     trusted_keys: Option<PathBuf>,
     audit_out: Option<PathBuf>,
+    run: bool,
     namespaces_only: bool,
     offline: bool,
 ) -> ExitCode {
@@ -423,6 +435,28 @@ fn install(
             )
         }
     };
+    eprintln!(
+        "⚠  SIMULATED PERIMETER — `capsule install` provisions an in-process box to exercise \
+         the spike end-to-end; it is NOT a security boundary."
+    );
+
+    // Record the accepted install. With --run this entry is the seed the
+    // session chains onto; without it, it's the whole record.
+    audit.append(Event::CapsuleInstalled {
+        artifact: label.clone(),
+        signer: installed.signer.clone(),
+        effective_grant: installed.effective_grant.pretty(),
+    });
+
+    // --run: hand the effective manifest to the supervisor and run a workload
+    // under it, proving the effective grant governs the session at runtime
+    // (commands beyond it are denied) — one audit chain from the install
+    // decision through the session it authorized.
+    if run {
+        return run_under_supervisor(fmt, start, &installed, &consumer, &env, audit, &audit_out);
+    }
+
+    // Default: provision the box and stop (the install gate, not a run).
     let policy = SandboxPolicy::from_manifest(&installed.manifest);
     let mut perimeter = SimulatedPerimeter::new();
     if let Err(e) = perimeter.provision(policy) {
@@ -435,17 +469,6 @@ fn install(
             e.to_string(),
         );
     }
-    eprintln!(
-        "⚠  SIMULATED PERIMETER — `capsule install` provisions an in-process box to exercise \
-         the spike end-to-end; it is NOT a security boundary."
-    );
-
-    // Record the accepted install, then persist the log if asked.
-    audit.append(Event::CapsuleInstalled {
-        artifact: label.clone(),
-        signer: installed.signer.clone(),
-        effective_grant: installed.effective_grant.pretty(),
-    });
     write_audit(&audit, &audit_out);
 
     let data = json!({
@@ -502,6 +525,106 @@ fn write_audit(audit: &AuditLog, out: &Option<PathBuf>) {
         if let Ok(json) = audit.to_json() {
             let _ = std::fs::write(path, json);
         }
+    }
+}
+
+/// Run a workload under the installed capsule's effective manifest via the
+/// supervisor loop, continuing the install audit log. The session proves the
+/// effective grant governs the box at runtime — commands beyond it are denied.
+fn run_under_supervisor(
+    fmt: &OutputFormat,
+    start: Instant,
+    installed: &InstalledCapsule,
+    consumer: &Manifest,
+    env: &Environment,
+    audit: AuditLog,
+    audit_out: &Option<PathBuf>,
+) -> ExitCode {
+    let supervisor = Supervisor::new(
+        installed.manifest.clone(),
+        demo_registry(),
+        SimulatedPerimeter::new(),
+        SystemClock,
+        Limits::default(),
+    )
+    // Continue the install decision's log so install + session are one chain.
+    .with_seed_audit(audit);
+
+    let mut workload = CapsuleWorkload::new();
+    let report = match supervisor.run(env, &mut workload) {
+        Ok(r) => r,
+        Err(e) => {
+            return emit_err(
+                fmt,
+                "capsule.install",
+                ExitCode::PreconditionFailed,
+                &e.to_string(),
+            )
+        }
+    };
+    write_audit(&report.audit, audit_out);
+
+    let data = json!({
+        "installed": true,
+        "ran": true,
+        "artifact": format!("{}@{}", installed.artifact.name, installed.artifact.version),
+        "signer": installed.signer,
+        "consumer_grant": consumer.grant.pretty(),
+        "effective_grant": installed.effective_grant.pretty(),
+        "effective_egress": installed.manifest.egress,
+        "perimeter": "simulated",
+        "security_boundary": false,
+        // The session the effective grant governed.
+        "outcome": format!("{:?}", report.outcome),
+        "commands_used": report.ledger.commands_used(),
+        "reprovisions": report.reprovisions,
+        // One continuous, tamper-evident chain: install decision → session.
+        "audit_entries": report.audit.len(),
+        "audit_head": report.audit.head(),
+        "audit_verified": report.audit.verify().is_ok(),
+        "audit_out": audit_out.as_ref().map(|p| p.display().to_string()),
+    });
+    emit(
+        &success_envelope("capsule.install", data, VERSION, Some(start), None),
+        fmt,
+    );
+    ExitCode::Success
+}
+
+/// A stand-in workload for the artifact's real entrypoint — binding *that* to
+/// the package bytes is the rootfs/layer open question on #36. It attempts a
+/// read, a write, and a network fetch, then signals done: enough that the
+/// effective grant is visibly load-bearing, since whichever of these the grant
+/// forbids is denied at mediation (e.g. an artifact granted only read-only fs
+/// has its `fs.write` refused, mid-session).
+struct CapsuleWorkload {
+    plan: Vec<AgentAction>,
+    idx: usize,
+}
+
+impl CapsuleWorkload {
+    fn new() -> Self {
+        Self {
+            plan: vec![
+                AgentAction::Run("fs.read".into()),
+                AgentAction::Run("fs.write".into()),
+                AgentAction::Run("net.fetch".into()),
+                AgentAction::Done,
+            ],
+            idx: 0,
+        }
+    }
+}
+
+impl Agent for CapsuleWorkload {
+    fn next_action(&mut self, _view: &AgentView) -> AgentAction {
+        let action = self
+            .plan
+            .get(self.idx)
+            .cloned()
+            .unwrap_or(AgentAction::Done);
+        self.idx += 1;
+        action
     }
 }
 

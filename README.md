@@ -278,21 +278,31 @@ Every install decision — accepted or refused — is recorded in the same
 decides, then `capsule_installed` or `capsule_refused` with the reason. An
 agent editing that record breaks the chain.
 
+With `--run`, install hands the effective manifest to the **supervisor** and
+runs a workload under it, so the effective grant is load-bearing *at
+runtime*: a read-only artifact has its `fs.write` denied mid-session, under
+budget, and the install decision and the session it authorized form **one
+unbroken audit chain** (`capsule_installed → provisioned → … →
+session_ended`). The workload is a stand-in for the artifact's real
+entrypoint — binding that to the package bytes is the rootfs question still
+open below.
+
 `bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
 package's required grant, a consumer installs it (publisher pinned, bytes
-verified) at least authority with a verifiable audit trail, and five
-refusals fire: a compromised update, a tampered contract, an unsatisfiable
-host, a substituted archive, and an untrusted publisher. No KVM, root, or
-network needed; it runs against the simulated perimeter.
+verified) at least authority with a verifiable audit trail, runs it under
+the effective grant (`--run`, a write denied mid-session), and five refusals
+fire: a compromised update, a tampered contract, an unsatisfiable host, a
+substituted archive, and an untrusted publisher. No KVM, root, or network
+needed; it runs against the simulated perimeter.
 
-`install` resolves the effective box and provisions it under the same
-*simulated* perimeter as `run`, so it is **not** a security boundary and
-says so (`security_boundary: false`). Still open (lex-os#36): fetching the
-artifact from a registry rather than a local file, earning signer trust
-from a publisher's track record (lex-lang's `ProducerTrust`) rather than a
-pinned keyring, running the installed capsule under the supervisor loop, and
-promoting the audit record into a publish-time attestation queryable via
-`lex blame`.
+`install` provisions the effective box under the same *simulated* perimeter
+as `run`, so it is **not** a security boundary and says so
+(`security_boundary: false`). Still open (lex-os#36): fetching the artifact
+from a registry rather than a local file, binding the artifact's real
+entrypoint to the box it runs in (the rootfs/layer question), earning signer
+trust from a publisher's track record (lex-lang's `ProducerTrust`) rather
+than a pinned keyring, and promoting the audit record into a publish-time
+attestation queryable via `lex blame`.
 
 ## The reversibility classification
 

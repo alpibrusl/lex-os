@@ -117,6 +117,73 @@ fn accepted_install_writes_a_verifiable_log() {
 }
 
 #[test]
+fn install_run_chains_the_session_onto_the_install_decision() {
+    let s = Scratch::new("run");
+    let secret = keygen(&"ac".repeat(32));
+    let artifact = s.path("art.tar");
+    std::fs::write(&artifact, b"the genuine published archive").unwrap();
+    let contract = s.path("contract.json");
+    let log = s.path("run.audit.json");
+
+    run(&[
+        "capsule",
+        "sign",
+        "--artifact",
+        "pdf-extract@2.0.0",
+        "--artifact-file",
+        &artifact,
+        "--requires",
+        &example("capsule-requires.json"),
+        "--key",
+        &secret,
+        "--out",
+        &contract,
+    ]);
+
+    let (_o, code) = run(&[
+        "capsule",
+        "install",
+        "--consumer",
+        &example("capsule-consumer.json"),
+        "--contract",
+        &contract,
+        "--artifact",
+        &artifact,
+        "--audit-out",
+        &log,
+        "--run",
+    ]);
+    assert_eq!(
+        code, 0,
+        "install --run should reach a terminal outcome and exit 0"
+    );
+
+    let audit = AuditLog::from_json(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert!(
+        audit.verify().is_ok(),
+        "the one install+session chain must verify"
+    );
+    // First entry is the install decision; the session chains onto it.
+    let nd = audit.to_ndjson().unwrap();
+    assert!(nd.contains("capsule_requested"));
+    assert!(nd.contains("capsule_installed"));
+    assert!(
+        nd.contains("provisioned"),
+        "the session provisioned the box"
+    );
+    assert!(
+        nd.contains("session_ended"),
+        "the session reached a terminal state"
+    );
+    // The effective read-only grant is load-bearing at runtime: the workload's
+    // fs.write is denied by the perimeter, mid-session.
+    assert!(
+        nd.contains("command_denied") && nd.contains("read-write not permitted"),
+        "the effective grant must deny fs.write at runtime"
+    );
+}
+
+#[test]
 fn refused_install_records_the_refusal_and_still_verifies() {
     let s = Scratch::new("refuse");
     let secret = keygen(&"ac".repeat(32));
