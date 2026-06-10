@@ -24,6 +24,7 @@ firecracker = ["lex-os-perimeter/firecracker"]
 lex-os-manifest.workspace = true
 lex-os-perimeter.workspace = true
 lex-os-resolver.workspace = true
+lex-os-capsule.workspace = true
 lex-os-supervisor.workspace = true
 lex-os-audit.workspace = true
 lex-os-check.workspace = true
@@ -33,4 +34,5 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+hex.workspace = true
 ureq = { version = "2", features = ["json"] }

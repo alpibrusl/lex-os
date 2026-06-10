@@ -1,0 +1,30 @@
+[package]
+name = "lex-os-capsule"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Capability-addressed distribution: a signed capability contract binding a distributable artifact to the trust Grant it requires, installed by narrowing a consumer's manifest (refuse, don't downgrade)."
+
+[dependencies]
+lex-os-manifest.workspace = true
+lex-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+# Ed25519 over the canonical contract bytes: the publisher signs, the
+# consumer verifies with the public key. `rand_core` enables keypair
+# generation from an OS CSPRNG; signing/verifying need no extra feature.
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand_core = { workspace = true, features = ["getrandom"] }
+
+[dev-dependencies]
+# The provisioning seam the spike must exercise end-to-end: an installed
+# capsule's effective manifest resolved against a host and provisioned on a
+# perimeter. Dev-only — the library itself stays pure logic.
+lex-os-resolver.workspace = true
+lex-os-perimeter.workspace = true

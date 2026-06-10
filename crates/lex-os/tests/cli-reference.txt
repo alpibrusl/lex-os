@@ -11,6 +11,7 @@ Commands:
   resolve     Negotiate a manifest against the (simulated) host and show what it resolves to — without running anything
   manifest    Manifest utilities
   audit       Audit-log utilities
+  capsule     Capability-addressed distribution (lex-os#34): sign an artifact to the grant it requires, and install it by narrowing a consumer's manifest — refuse, don't downgrade
   check       Type-check an agent Lex program against a manifest grant and refuse it if its effects exceed the grant — the type-check wall (demo Attempt 1), run *before* the program executes
   introspect  Emit the acli command tree for agent discovery
   help        Print this message or the help of the given subcommand(s)
@@ -201,6 +202,69 @@ Options:
       --grant <GRANT>    Manifest JSON whose grant + egress the program is checked against
       --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
   -h, --help             Print help
+
+===== lex-os capsule =====
+Capability-addressed distribution (lex-os#34): sign an artifact to the grant it requires, and install it by narrowing a consumer's manifest — refuse, don't downgrade
+
+Usage: lex-os capsule [OPTIONS] <COMMAND>
+
+Commands:
+  keygen   Generate an Ed25519 publisher keypair, printing the secret and public keys as hex. With `--seed` the key is derived deterministically (for reproducible demos); otherwise it comes from the OS CSPRNG
+  sign     Sign a capability contract: bind an artifact to the grant + egress it requires (taken from a manifest's grant), with the publisher's key
+  verify   Verify a signed contract's Ed25519 signature
+  install  Install a signed contract against a consumer manifest: refuse if the artifact wants more than the consumer grants, otherwise resolve and provision the effective box under the simulated perimeter
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os capsule keygen =====
+Generate an Ed25519 publisher keypair, printing the secret and public keys as hex. With `--seed` the key is derived deterministically (for reproducible demos); otherwise it comes from the OS CSPRNG
+
+Usage: lex-os capsule keygen [OPTIONS]
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --seed <SEED>      32-byte hex seed for a deterministic key (64 hex chars)
+  -h, --help             Print help
+
+===== lex-os capsule sign =====
+Sign a capability contract: bind an artifact to the grant + egress it requires (taken from a manifest's grant), with the publisher's key
+
+Usage: lex-os capsule sign [OPTIONS] --artifact <ARTIFACT> --content-hash <CONTENT_HASH> --requires <REQUIRES> --key <KEY>
+
+Options:
+      --artifact <ARTIFACT>          Artifact identity as `name@version`
+      --output <OUTPUT>              Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --content-hash <CONTENT_HASH>  Hex SHA-256 of the published package archive (its content address)
+      --requires <REQUIRES>          Manifest JSON whose grant + egress are the artifact's requirement
+      --key <KEY>                    Signing key as 32-byte hex (the secret printed by `keygen`)
+      --out <OUT>                    Write the signed contract JSON here (default: stdout)
+  -h, --help                         Print help
+
+===== lex-os capsule verify =====
+Verify a signed contract's Ed25519 signature
+
+Usage: lex-os capsule verify [OPTIONS] --contract <CONTRACT>
+
+Options:
+      --contract <CONTRACT>  
+      --output <OUTPUT>      Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help                 Print help
+
+===== lex-os capsule install =====
+Install a signed contract against a consumer manifest: refuse if the artifact wants more than the consumer grants, otherwise resolve and provision the effective box under the simulated perimeter
+
+Usage: lex-os capsule install [OPTIONS] --consumer <CONSUMER> --contract <CONTRACT>
+
+Options:
+      --consumer <CONSUMER>  The consumer's manifest — the ceiling the artifact is bound by
+      --output <OUTPUT>      Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --contract <CONTRACT>  The signed capability contract travelling with the artifact
+      --namespaces-only      Pretend the host can only do namespace isolation
+      --offline              Pretend the host has no outbound network
+  -h, --help                 Print help
 
 ===== lex-os introspect =====
 Emit the acli command tree for agent discovery

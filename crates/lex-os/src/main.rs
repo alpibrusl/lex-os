@@ -12,6 +12,7 @@
 //! budgets with reprovision-on-death.
 
 mod agent;
+mod capsule;
 mod demo;
 
 use std::path::PathBuf;
@@ -169,6 +170,13 @@ enum Cmd {
         #[command(subcommand)]
         what: AuditCmd,
     },
+    /// Capability-addressed distribution (lex-os#34): sign an artifact to
+    /// the grant it requires, and install it by narrowing a consumer's
+    /// manifest — refuse, don't downgrade.
+    Capsule {
+        #[command(subcommand)]
+        what: capsule::CapsuleCmd,
+    },
     /// Type-check an agent Lex program against a manifest grant and
     /// refuse it if its effects exceed the grant — the type-check wall
     /// (demo Attempt 1), run *before* the program executes.
@@ -310,6 +318,7 @@ fn main() {
         } => cmd_resolve(&fmt, manifest, namespaces_only, offline),
         Cmd::Manifest { what } => cmd_manifest(&fmt, what),
         Cmd::Audit { what } => cmd_audit(&fmt, what),
+        Cmd::Capsule { what } => capsule::cmd_capsule(&fmt, what),
         Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
         Cmd::Introspect => cmd_introspect(&fmt),
         #[cfg(feature = "firecracker")]
@@ -1197,6 +1206,25 @@ fn cmd_introspect(fmt: &OutputFormat) -> ExitCode {
             "Reject a net program under network:none",
             "lex-os check --grant manifest.json agent.lex",
         )]),
+    );
+    tree.add_command(
+        CommandInfo::new(
+            "capsule",
+            "Capability-addressed distribution: sign an artifact to the grant it requires, then install it by narrowing a consumer's manifest (refuse, don't downgrade).",
+        )
+        .conditionally_idempotent()
+        .with_examples(vec![
+            ("Generate a publisher key", "lex-os capsule keygen"),
+            (
+                "Sign an artifact's required grant",
+                "lex-os capsule sign --artifact lex-weather@1.2.0 --content-hash <sha256> --requires requires.json --key <secret> --out contract.json",
+            ),
+            (
+                "Install against a consumer manifest (or refuse)",
+                "lex-os capsule install --consumer consumer.json --contract contract.json",
+            ),
+        ])
+        .with_see_also(vec!["manifest", "resolve"]),
     );
 
     let data = serde_json::to_value(&tree).unwrap_or(json!({}));
