@@ -67,12 +67,22 @@ say "Consumer side — install (ACCEPT: publisher pinned, bytes verified, least 
   --consumer examples/capsule-consumer.json \
   --contract "$WORK/pdf-extract.contract.json" \
   --artifact "$WORK/pdf-extract-2.0.0.tar" \
-  --trusted-keys "$WORK/keyring.json" 2>/dev/null > "$WORK/installed.json"
+  --trusted-keys "$WORK/keyring.json" \
+  --audit-out "$WORK/install.audit.json" 2>/dev/null > "$WORK/installed.json"
 note "consumer grant : $(field consumer_grant  < "$WORK/installed.json")   (what the team WAS willing to allow)"
 note "EFFECTIVE grant: $(field effective_grant < "$WORK/installed.json")   (what the box ACTUALLY runs at)"
 note "effective egress: $(field effective_egress < "$WORK/installed.json")"
 note "bytes verified: $(field artifact_bytes_verified < "$WORK/installed.json")  | signer trust checked: $(field signer_trust_checked < "$WORK/installed.json")"
 note "box alive: $(field box_alive < "$WORK/installed.json")  | security_boundary: $(field security_boundary < "$WORK/installed.json")"
+
+say "Consumer side — the decision is recorded in a tamper-evident audit log"
+"$LEXOS" audit render --log "$WORK/install.audit.json" | python3 -c '
+import sys, json
+for line in sys.stdin:
+    e = json.loads(line)["event"]
+    print("    -", e["kind"])'
+verified=$("$LEXOS" --output json audit verify --log "$WORK/install.audit.json" | field verified)
+note "hash chain verifies: $verified  (an agent editing this log breaks the chain)"
 
 refuse() { # <label> <file-with-error-envelope>
   note "refused: $(field message < "$2")"

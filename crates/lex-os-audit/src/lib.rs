@@ -54,6 +54,20 @@ pub enum Event {
     /// child with broader trust) was rejected by the narrowing
     /// invariant. The demo's `[BLOCKED:narrowing]` line.
     NarrowingBlocked { reason: String },
+    /// A capsule install was requested — logged *before* any gate decides,
+    /// like [`Event::CommandRequested`]. `signer` is the claimed (not yet
+    /// verified) publisher key.
+    CapsuleRequested { artifact: String, signer: String },
+    /// A capsule passed every gate (authenticity, trusted signer, byte
+    /// integrity, narrowing) and the effective box was provisioned.
+    CapsuleInstalled {
+        artifact: String,
+        signer: String,
+        effective_grant: String,
+    },
+    /// A capsule install was refused, with the reason (an untrusted signer,
+    /// a substituted archive, a widening grant, an unsatisfiable host, …).
+    CapsuleRefused { artifact: String, reason: String },
     /// The session reached a terminal state.
     SessionEnded { outcome: String },
 }
@@ -264,6 +278,32 @@ mod tests {
         log.entries[1].seq = 1;
         let err = log.verify().unwrap_err();
         assert!(matches!(err, AuditError::Broken { .. }));
+    }
+
+    #[test]
+    fn capsule_install_events_chain_and_verify() {
+        // A capsule install records request → decision, like the mediation
+        // loop's request → allow/deny.
+        let mut log = AuditLog::new();
+        log.append(Event::CapsuleRequested {
+            artifact: "pdf-extract@2.0.0".into(),
+            signer: "f9b43983".into(),
+        });
+        log.append(Event::CapsuleInstalled {
+            artifact: "pdf-extract@2.0.0".into(),
+            signer: "f9b43983".into(),
+            effective_grant: "fs=read-only net=allowlist exec=none".into(),
+        });
+        assert!(log.verify().is_ok());
+        assert_eq!(log.entries()[1].prev_hash, log.entries()[0].hash);
+        // A refusal is just as recordable, and tamper-evident.
+        let mut refused = AuditLog::new();
+        refused.append(Event::CapsuleRefused {
+            artifact: "pdf-extract@2.1.0".into(),
+            reason: "signer not in trusted keyring".into(),
+        });
+        assert!(refused.verify().is_ok());
+        assert!(refused.to_ndjson().unwrap().contains("capsule_refused"));
     }
 
     #[test]

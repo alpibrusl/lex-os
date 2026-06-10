@@ -25,6 +25,7 @@ use acli::{emit, success_envelope, ExitCode, OutputFormat};
 use clap::Subcommand;
 use serde_json::json;
 
+use lex_os_audit::{AuditLog, Event};
 use lex_os_capsule::{
     generate_signing_key, signing_key_from_seed, ArtifactRef, CapabilityContract, Capsule,
     CapsuleError, InstallOptions, Keyring, SignedContract,
@@ -97,6 +98,10 @@ pub enum CapsuleCmd {
         /// warned).
         #[arg(long)]
         trusted_keys: Option<PathBuf>,
+        /// Write a tamper-evident audit log of the install decision (request →
+        /// installed/refused) here. Verify it with `lex-os audit verify`.
+        #[arg(long)]
+        audit_out: Option<PathBuf>,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -131,6 +136,7 @@ pub fn cmd_capsule(fmt: &OutputFormat, what: CapsuleCmd) -> ExitCode {
             contract,
             artifact,
             trusted_keys,
+            audit_out,
             namespaces_only,
             offline,
         } => install(
@@ -139,6 +145,7 @@ pub fn cmd_capsule(fmt: &OutputFormat, what: CapsuleCmd) -> ExitCode {
             contract,
             artifact,
             trusted_keys,
+            audit_out,
             namespaces_only,
             offline,
         ),
@@ -297,6 +304,7 @@ fn install(
     contract: PathBuf,
     artifact: Option<PathBuf>,
     trusted_keys: Option<PathBuf>,
+    audit_out: Option<PathBuf>,
     namespaces_only: bool,
     offline: bool,
 ) -> ExitCode {
@@ -309,6 +317,10 @@ fn install(
         Ok(s) => s,
         Err(e) => return emit_err(fmt, "capsule.install", ExitCode::InvalidArgs, &e),
     };
+    let label = format!(
+        "{}@{}",
+        signed.contract.artifact.name, signed.contract.artifact.version
+    );
 
     // Integrity gate input: the artifact bytes, if supplied. Skipping it is
     // allowed but loudly warned — the contract's content_hash is then a
@@ -364,70 +376,77 @@ fn install(
         keyring: keyring.as_ref(),
     };
 
+    // Tamper-evident record of the decision. Log the request *before* any gate
+    // decides — the same "log, then decide" order as the mediation loop. The
+    // signer here is the claimed (not yet verified) publisher key.
+    let mut audit = AuditLog::new();
+    audit.append(Event::CapsuleRequested {
+        artifact: label.clone(),
+        signer: signed.signer.clone(),
+    });
+
     // The gate: authenticity → trusted signer → artifact bytes → narrow.
     let installed = match Capsule::install_with(&consumer, &signed, &opts) {
         Ok(i) => i,
         // Distinguish authenticity / authorization / integrity / capability
-        // failures so the exit code and message are honest about *why*.
-        Err(e @ (CapsuleError::SignatureInvalid | CapsuleError::MalformedKey)) => {
-            return emit_err(
-                fmt,
-                "capsule.install",
-                ExitCode::PreconditionFailed,
-                &format!("authenticity: {e}"),
-            )
-        }
-        Err(
-            e @ (CapsuleError::UntrustedSigner { .. }
-            | CapsuleError::ArtifactHashMismatch { .. }
-            | CapsuleError::Refused(_)),
-        ) => {
-            return emit_err(
-                fmt,
-                "capsule.install",
-                ExitCode::PreconditionFailed,
-                &e.to_string(),
-            )
-        }
+        // failures so the exit code and message are honest about *why*. Every
+        // refusal is recorded before we return.
         Err(e) => {
-            return emit_err(
-                fmt,
-                "capsule.install",
-                ExitCode::InvalidArgs,
-                &e.to_string(),
-            )
+            let (code, msg) = match &e {
+                CapsuleError::SignatureInvalid | CapsuleError::MalformedKey => {
+                    (ExitCode::PreconditionFailed, format!("authenticity: {e}"))
+                }
+                CapsuleError::UntrustedSigner { .. }
+                | CapsuleError::ArtifactHashMismatch { .. }
+                | CapsuleError::Refused(_) => (ExitCode::PreconditionFailed, e.to_string()),
+                _ => (ExitCode::InvalidArgs, e.to_string()),
+            };
+            return refuse_install(audit, &audit_out, fmt, &label, code, msg);
         }
     };
 
     // Resolve the effective manifest against the host and actually provision
     // the (simulated) box, so the spike runs end-to-end rather than stopping
-    // at the type level. This is NOT a security boundary — say so.
+    // at the type level. This is NOT a security boundary — say so. A host that
+    // can't honor the grant is a refusal too, and recorded as one.
     let env = environment(namespaces_only, offline);
     let plan = match resolve(&installed.manifest, &env) {
         Ok(p) => p,
         Err(e) => {
-            return emit_err(
+            return refuse_install(
+                audit,
+                &audit_out,
                 fmt,
-                "capsule.install",
+                &label,
                 ExitCode::PreconditionFailed,
-                &e.to_string(),
+                e.to_string(),
             )
         }
     };
     let policy = SandboxPolicy::from_manifest(&installed.manifest);
     let mut perimeter = SimulatedPerimeter::new();
     if let Err(e) = perimeter.provision(policy) {
-        return emit_err(
+        return refuse_install(
+            audit,
+            &audit_out,
             fmt,
-            "capsule.install",
+            &label,
             ExitCode::PreconditionFailed,
-            &e.to_string(),
+            e.to_string(),
         );
     }
     eprintln!(
         "⚠  SIMULATED PERIMETER — `capsule install` provisions an in-process box to exercise \
          the spike end-to-end; it is NOT a security boundary."
     );
+
+    // Record the accepted install, then persist the log if asked.
+    audit.append(Event::CapsuleInstalled {
+        artifact: label.clone(),
+        signer: installed.signer.clone(),
+        effective_grant: installed.effective_grant.pretty(),
+    });
+    write_audit(&audit, &audit_out);
 
     let data = json!({
         "installed": true,
@@ -444,12 +463,46 @@ fn install(
         // Which provenance gates actually ran (vs. were skipped with a warning).
         "artifact_bytes_verified": artifact.is_some(),
         "signer_trust_checked": trusted_keys.is_some(),
+        // The tamper-evident record of this decision.
+        "audit_entries": audit.len(),
+        "audit_head": audit.head(),
+        "audit_verified": audit.verify().is_ok(),
+        "audit_out": audit_out.as_ref().map(|p| p.display().to_string()),
     });
     emit(
         &success_envelope("capsule.install", data, VERSION, Some(start), None),
         fmt,
     );
     ExitCode::Success
+}
+
+/// Record a refused install in the audit log, persist it if `--audit-out` was
+/// given, and emit the error envelope. Takes the log by value because a
+/// refusal always returns.
+fn refuse_install(
+    mut audit: AuditLog,
+    out: &Option<PathBuf>,
+    fmt: &OutputFormat,
+    artifact: &str,
+    code: ExitCode,
+    msg: String,
+) -> ExitCode {
+    audit.append(Event::CapsuleRefused {
+        artifact: artifact.to_string(),
+        reason: msg.clone(),
+    });
+    write_audit(&audit, out);
+    emit_err(fmt, "capsule.install", code, &msg)
+}
+
+/// Persist the audit log to `out` if a path was given. Best-effort: a write
+/// failure must not change the install's exit code.
+fn write_audit(audit: &AuditLog, out: &Option<PathBuf>) {
+    if let Some(path) = out {
+        if let Ok(json) = audit.to_json() {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 fn decode_seed(s: &str) -> Result<[u8; 32], String> {

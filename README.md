@@ -265,24 +265,34 @@ cargo run -p lex-os -- capsule sign \
 cargo run -p lex-os -- capsule verify --contract contract.json  # check the signature
 cargo run -p lex-os -- capsule install \
   --consumer examples/capsule-consumer.json --contract contract.json \
-  --artifact lex-weather-1.2.0.tar --trusted-keys keyring.json
+  --artifact lex-weather-1.2.0.tar --trusted-keys keyring.json \
+  --audit-out install.audit.json
 #   installs at the artifact's least authority, OR refuses (exit 8) on an
-#   untrusted signer, a substituted archive, or a grant it was never given
+#   untrusted signer, a substituted archive, or a grant it was never given —
+#   either way the decision is recorded (verify it with `audit verify`)
 ```
+
+Every install decision — accepted or refused — is recorded in the same
+**hash-chained audit log** as the mediation loop (`--audit-out`, then
+`lex-os audit verify`): `capsule_requested` is logged *before* any gate
+decides, then `capsule_installed` or `capsule_refused` with the reason. An
+agent editing that record breaks the chain.
 
 `bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
 package's required grant, a consumer installs it (publisher pinned, bytes
-verified) at least authority, and five refusals fire: a compromised update,
-a tampered contract, an unsatisfiable host, a substituted archive, and an
-untrusted publisher. No KVM, root, or network needed; it runs against the
-simulated perimeter.
+verified) at least authority with a verifiable audit trail, and five
+refusals fire: a compromised update, a tampered contract, an unsatisfiable
+host, a substituted archive, and an untrusted publisher. No KVM, root, or
+network needed; it runs against the simulated perimeter.
 
 `install` resolves the effective box and provisions it under the same
 *simulated* perimeter as `run`, so it is **not** a security boundary and
-says so (`security_boundary: false`). Still open (lex-os#34): fetching the
+says so (`security_boundary: false`). Still open (lex-os#36): fetching the
 artifact from a registry rather than a local file, earning signer trust
 from a publisher's track record (lex-lang's `ProducerTrust`) rather than a
-pinned keyring, and recording installs in the attestation graph.
+pinned keyring, running the installed capsule under the supervisor loop, and
+promoting the audit record into a publish-time attestation queryable via
+`lex blame`.
 
 ## The reversibility classification
 
