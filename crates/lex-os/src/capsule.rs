@@ -105,12 +105,17 @@ pub enum CapsuleCmd {
         /// with `lex-os audit verify`.
         #[arg(long)]
         audit_out: Option<PathBuf>,
-        /// After installing, run a workload under the effective manifest via
-        /// the supervisor mediation loop — proving the effective grant governs
-        /// the session (commands beyond it are denied). One audit chain spans
-        /// the install decision and the session it authorized.
-        #[arg(long)]
+        /// After installing, run the package's entrypoint under the effective
+        /// manifest: extract it from the artifact, type-check it against the
+        /// effective grant (over-reach refused before it runs), then drive the
+        /// supervisor loop from its declared effects. One audit chain spans the
+        /// install decision and the session it authorized. Requires `--artifact`.
+        #[arg(long, requires = "artifact")]
         run: bool,
+        /// Path *within the package archive* of the entrypoint Lex program to
+        /// run under `--run`. Defaults to `src/main.lex`.
+        #[arg(long)]
+        entrypoint: Option<String>,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -147,6 +152,7 @@ pub fn cmd_capsule(fmt: &OutputFormat, what: CapsuleCmd) -> ExitCode {
             trusted_keys,
             audit_out,
             run,
+            entrypoint,
             namespaces_only,
             offline,
         } => install(
@@ -157,6 +163,7 @@ pub fn cmd_capsule(fmt: &OutputFormat, what: CapsuleCmd) -> ExitCode {
             trusted_keys,
             audit_out,
             run,
+            entrypoint,
             namespaces_only,
             offline,
         ),
@@ -317,6 +324,7 @@ fn install(
     trusted_keys: Option<PathBuf>,
     audit_out: Option<PathBuf>,
     run: bool,
+    entrypoint: Option<String>,
     namespaces_only: bool,
     offline: bool,
 ) -> ExitCode {
@@ -440,20 +448,67 @@ fn install(
          the spike end-to-end; it is NOT a security boundary."
     );
 
-    // Record the accepted install. With --run this entry is the seed the
-    // session chains onto; without it, it's the whole record.
-    audit.append(Event::CapsuleInstalled {
-        artifact: label.clone(),
-        signer: installed.signer.clone(),
-        effective_grant: installed.effective_grant.pretty(),
-    });
-
-    // --run: hand the effective manifest to the supervisor and run a workload
-    // under it, proving the effective grant governs the session at runtime
-    // (commands beyond it are denied) — one audit chain from the install
-    // decision through the session it authorized.
+    // --run: run the package's *real entrypoint* under the effective manifest.
+    // Extract it from the verified archive, type-check it against the effective
+    // grant (over-reach refused before the box runs), then drive the supervisor
+    // loop from its declared effects — one audit chain from the install decision
+    // through the session it authorized. (`--run` requires `--artifact`.) The
+    // entrypoint check is a gate on *running*, so it precedes `CapsuleInstalled`.
     if run {
-        return run_under_supervisor(fmt, start, &installed, &consumer, &env, audit, &audit_out);
+        let bytes = artifact_bytes
+            .as_deref()
+            .expect("clap guarantees --artifact is present with --run");
+        let ep = entrypoint.as_deref().unwrap_or("src/main.lex");
+        let source = match extract_text_from_targz(bytes, ep) {
+            Ok(s) => s,
+            Err(e) => {
+                return refuse_install(
+                    audit,
+                    &audit_out,
+                    fmt,
+                    &label,
+                    ExitCode::PreconditionFailed,
+                    e,
+                )
+            }
+        };
+        // The type-check wall, now on the distributed package's own code: its
+        // declared effects must fit the box's least authority, or it is refused
+        // before anything runs.
+        let report = match lex_os_check::check_source_against_manifest(&source, &installed.manifest)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return refuse_install(
+                    audit,
+                    &audit_out,
+                    fmt,
+                    &label,
+                    ExitCode::PreconditionFailed,
+                    format!("entrypoint `{ep}` exceeds the effective grant: {e}"),
+                )
+            }
+        };
+        // Past every gate: the install is accepted; this entry seeds the chain
+        // the session continues.
+        audit.append(Event::CapsuleInstalled {
+            artifact: label.clone(),
+            signer: installed.signer.clone(),
+            effective_grant: installed.effective_grant.pretty(),
+        });
+        let workload = commands_for_effects(&report.effects);
+        return run_under_supervisor(
+            fmt,
+            start,
+            &installed,
+            &consumer,
+            &env,
+            audit,
+            &audit_out,
+            ep,
+            report.effects,
+            workload,
+        );
     }
 
     // Default: provision the box and stop (the install gate, not a run).
@@ -469,6 +524,12 @@ fn install(
             e.to_string(),
         );
     }
+    // Provisioned: the install is accepted. Record it, then persist the log.
+    audit.append(Event::CapsuleInstalled {
+        artifact: label.clone(),
+        signer: installed.signer.clone(),
+        effective_grant: installed.effective_grant.pretty(),
+    });
     write_audit(&audit, &audit_out);
 
     let data = json!({
@@ -528,9 +589,12 @@ fn write_audit(audit: &AuditLog, out: &Option<PathBuf>) {
     }
 }
 
-/// Run a workload under the installed capsule's effective manifest via the
-/// supervisor loop, continuing the install audit log. The session proves the
-/// effective grant governs the box at runtime — commands beyond it are denied.
+/// Run the package's entrypoint under the installed capsule's effective
+/// manifest via the supervisor loop, continuing the install audit log. The
+/// `workload` is derived from the entrypoint's type-checked effects, so the
+/// session exercises exactly the capabilities the package declared — mediated,
+/// and chained onto the install decision.
+#[allow(clippy::too_many_arguments)]
 fn run_under_supervisor(
     fmt: &OutputFormat,
     start: Instant,
@@ -539,6 +603,9 @@ fn run_under_supervisor(
     env: &Environment,
     audit: AuditLog,
     audit_out: &Option<PathBuf>,
+    entrypoint: &str,
+    effects: Vec<String>,
+    workload: Vec<String>,
 ) -> ExitCode {
     let supervisor = Supervisor::new(
         installed.manifest.clone(),
@@ -550,8 +617,8 @@ fn run_under_supervisor(
     // Continue the install decision's log so install + session are one chain.
     .with_seed_audit(audit);
 
-    let mut workload = CapsuleWorkload::new();
-    let report = match supervisor.run(env, &mut workload) {
+    let mut agent = CapsuleWorkload::from_commands(workload.clone());
+    let report = match supervisor.run(env, &mut agent) {
         Ok(r) => r,
         Err(e) => {
             return emit_err(
@@ -574,6 +641,10 @@ fn run_under_supervisor(
         "effective_egress": installed.manifest.egress,
         "perimeter": "simulated",
         "security_boundary": false,
+        // The entrypoint that actually ran, type-checked against the grant.
+        "entrypoint": entrypoint,
+        "entrypoint_effects": effects,
+        "workload": workload,
         // The session the effective grant governed.
         "outcome": format!("{:?}", report.outcome),
         "commands_used": report.ledger.commands_used(),
@@ -591,28 +662,68 @@ fn run_under_supervisor(
     ExitCode::Success
 }
 
-/// A stand-in workload for the artifact's real entrypoint — binding *that* to
-/// the package bytes is the rootfs/layer open question on #36. It attempts a
-/// read, a write, and a network fetch, then signals done: enough that the
-/// effective grant is visibly load-bearing, since whichever of these the grant
-/// forbids is denied at mediation (e.g. an artifact granted only read-only fs
-/// has its `fs.write` refused, mid-session).
+/// Extract a UTF-8 text file named `name` from a gzipped tar archive — the
+/// `lex pkg` format (`gzip(tar(lex.toml + src/**))`). Errors are human-readable
+/// refusal reasons.
+fn extract_text_from_targz(bytes: &[u8], name: &str) -> Result<String, String> {
+    use std::io::Read;
+    let gz = flate2::read::GzDecoder::new(bytes);
+    let mut ar = tar::Archive::new(gz);
+    let entries = ar
+        .entries()
+        .map_err(|e| format!("could not read package archive (expected a gzipped tar): {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("corrupt entry in package archive: {e}"))?;
+        let path_ok = entry
+            .path()
+            .map(|p| p.to_string_lossy() == name)
+            .unwrap_or(false);
+        if path_ok {
+            let mut s = String::new();
+            entry
+                .read_to_string(&mut s)
+                .map_err(|e| format!("entrypoint `{name}` is not valid UTF-8: {e}"))?;
+            return Ok(s);
+        }
+    }
+    Err(format!("package has no entrypoint at `{name}`"))
+}
+
+/// Map an entrypoint's declared effects to the mediated commands that exercise
+/// them, so the session reflects what the package actually does. Effects with
+/// no consequential reach (io, time, …) mediate to nothing.
+fn commands_for_effects(effects: &[String]) -> Vec<String> {
+    let mut cmds: Vec<String> = Vec::new();
+    for e in effects {
+        let cmd = match e.as_str() {
+            "fs_read" | "fs_walk" => "fs.read",
+            "fs_write" => "fs.write",
+            "net" | "http" | "mcp" | "llm_cloud" => "net.fetch",
+            "proc" => "exec.shell",
+            _ => continue,
+        };
+        if !cmds.iter().any(|c| c == cmd) {
+            cmds.push(cmd.to_string());
+        }
+    }
+    cmds
+}
+
+/// The workload that runs the package's declared operations: one mediated
+/// command per capability the type-checked entrypoint uses, then done. It is a
+/// faithful stand-in for executing the entrypoint — lex-os mediates the
+/// capabilities it declared; in-box Lex interpretation (lex-runtime) or a real
+/// rootfs+exec under Firecracker is the next step.
 struct CapsuleWorkload {
     plan: Vec<AgentAction>,
     idx: usize,
 }
 
 impl CapsuleWorkload {
-    fn new() -> Self {
-        Self {
-            plan: vec![
-                AgentAction::Run("fs.read".into()),
-                AgentAction::Run("fs.write".into()),
-                AgentAction::Run("net.fetch".into()),
-                AgentAction::Done,
-            ],
-            idx: 0,
-        }
+    fn from_commands(commands: Vec<String>) -> Self {
+        let mut plan: Vec<AgentAction> = commands.into_iter().map(AgentAction::Run).collect();
+        plan.push(AgentAction::Done);
+        Self { plan, idx: 0 }
     }
 }
 

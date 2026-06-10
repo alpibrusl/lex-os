@@ -270,6 +270,9 @@ cargo run -p lex-os -- capsule install \
 #   installs at the artifact's least authority, OR refuses (exit 8) on an
 #   untrusted signer, a substituted archive, or a grant it was never given —
 #   either way the decision is recorded (verify it with `audit verify`)
+cargo run -p lex-os -- capsule install … --artifact lex-weather-1.2.0.tar --run
+#   …and --run extracts the package's src/main.lex, type-checks it against the
+#   effective grant, and runs the session from its declared effects
 ```
 
 Every install decision — accepted or refused — is recorded in the same
@@ -278,31 +281,36 @@ Every install decision — accepted or refused — is recorded in the same
 decides, then `capsule_installed` or `capsule_refused` with the reason. An
 agent editing that record breaks the chain.
 
-With `--run`, install hands the effective manifest to the **supervisor** and
-runs a workload under it, so the effective grant is load-bearing *at
-runtime*: a read-only artifact has its `fs.write` denied mid-session, under
-budget, and the install decision and the session it authorized form **one
+With `--run`, install runs the package's **real entrypoint** under the
+effective manifest: it extracts `src/main.lex` from the verified archive,
+**type-checks it against the effective grant** (the type-check wall, now on
+the distributed package's own code — an entrypoint that over-reaches is
+refused *before* it runs), then drives the supervisor loop from its declared
+effects. The install decision and the session it authorized form **one
 unbroken audit chain** (`capsule_installed → provisioned → … →
-session_ended`). The workload is a stand-in for the artifact's real
-entrypoint — binding that to the package bytes is the rootfs question still
-open below.
+session_ended`). lex-os mediates the capabilities the entrypoint declared;
+actually *interpreting* the Lex in-box (lex-runtime) or a real rootfs+exec
+under Firecracker is the next step still open below.
 
 `bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
 package's required grant, a consumer installs it (publisher pinned, bytes
-verified) at least authority with a verifiable audit trail, runs it under
-the effective grant (`--run`, a write denied mid-session), and five refusals
-fire: a compromised update, a tampered contract, an unsatisfiable host, a
-substituted archive, and an untrusted publisher. No KVM, root, or network
-needed; it runs against the simulated perimeter.
+verified) at least authority with a verifiable audit trail, runs its real
+entrypoint under the effective grant (`--run`; an over-reaching entrypoint
+refused at the type-check wall), and five refusals fire: a compromised
+update, a tampered contract, an unsatisfiable host, a substituted archive,
+and an untrusted publisher. No KVM, root, or network needed; it runs against
+the simulated perimeter.
 
 `install` provisions the effective box under the same *simulated* perimeter
 as `run`, so it is **not** a security boundary and says so
-(`security_boundary: false`). Still open (lex-os#36): fetching the artifact
-from a registry rather than a local file, binding the artifact's real
-entrypoint to the box it runs in (the rootfs/layer question), earning signer
-trust from a publisher's track record (lex-lang's `ProducerTrust`) rather
-than a pinned keyring, and promoting the audit record into a publish-time
-attestation queryable via `lex blame`.
+(`security_boundary: false`). Still open (lex-os#36): actually interpreting
+the entrypoint's Lex in-box (lex-runtime) or running it on a real
+rootfs+exec under Firecracker — `--run` today mediates the capabilities the
+type-checked entrypoint *declares*; fetching the artifact from a registry
+rather than a local file; earning signer trust from a publisher's track
+record (lex-lang's `ProducerTrust`) rather than a pinned keyring; and
+promoting the audit record into a publish-time attestation queryable via
+`lex blame`.
 
 ## The reversibility classification
 

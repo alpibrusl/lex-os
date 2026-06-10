@@ -40,8 +40,12 @@ field() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('data',
 pub_of() { "$LEXOS" --output json capsule keygen --seed "$1" | field public_key; }
 secret_of() { "$LEXOS" --output json capsule keygen --seed "$1" | field secret_key; }
 
-# The "published archive" — real bytes, so its hash is real.
-printf 'pdf-extract 2.0.0 — the genuine published archive\n' > "$WORK/pdf-extract-2.0.0.tar"
+# The "published archive" is a real `lex pkg` package: a gzip tar of lex.toml
+# + src/main.lex. Its entrypoint declares [net] — within pdf-extract's grant.
+mkdir -p "$WORK/pkg/src"
+printf '[package]\nname = "pdf-extract"\nversion = "2.0.0"\n' > "$WORK/pkg/lex.toml"
+printf 'import "std.net" as net\nfn run(u :: Str) -> [net] Result[Str, Str] { net.get(u) }\n' > "$WORK/pkg/src/main.lex"
+tar czf "$WORK/pdf-extract-2.0.0.tar" -C "$WORK/pkg" lex.toml src
 
 say "Publisher identities"
 ACME_SEED=$(printf 'ac%.0s' {1..32});  ACME_SECRET=$(secret_of "$ACME_SEED");  ACME_PUBLIC=$(pub_of "$ACME_SEED")
@@ -84,23 +88,38 @@ for line in sys.stdin:
 verified=$("$LEXOS" --output json audit verify --log "$WORK/install.audit.json" | field verified)
 note "hash chain verifies: $verified  (an agent editing this log breaks the chain)"
 
-say "Consumer side — run a workload under the effective grant (--run)"
-note "The effective grant (fs=read-only) now governs a live session: reads and the"
-note "allowlisted fetch are allowed, but a write is denied — at runtime, mid-session."
+say "Consumer side — run the package's real entrypoint under the effective grant (--run)"
+note "install --run extracts src/main.lex from the verified archive, type-checks it"
+note "against the effective grant, and drives the session from its declared effects."
 "$LEXOS" --output json capsule install \
   --consumer examples/capsule-consumer.json \
   --contract "$WORK/pdf-extract.contract.json" \
   --artifact "$WORK/pdf-extract-2.0.0.tar" \
   --trusted-keys "$WORK/keyring.json" \
   --audit-out "$WORK/run.audit.json" --run 2>/dev/null > "$WORK/ran.json"
-note "outcome: $(field outcome < "$WORK/ran.json")  | commands run: $(field commands_used < "$WORK/ran.json")  | one chain of $(field audit_entries < "$WORK/ran.json") entries, verified: $(field audit_verified < "$WORK/ran.json")"
+note "entrypoint: $(field entrypoint < "$WORK/ran.json")  | declared effects: $(field entrypoint_effects < "$WORK/ran.json")  | outcome: $(field outcome < "$WORK/ran.json")"
+note "one chain of $(field audit_entries < "$WORK/ran.json") entries (install decision → session), verified: $(field audit_verified < "$WORK/ran.json")"
 "$LEXOS" audit render --log "$WORK/run.audit.json" | python3 -c '
 import sys, json
 for line in sys.stdin:
     e = json.loads(line)["event"]
     detail = e.get("command") or e.get("outcome") or ""
-    denied = " (DENIED)" if e["kind"] == "command_denied" else ""
-    print("    -", e["kind"], ("· " + detail) if detail else "", denied)'
+    print("    -", e["kind"], ("· " + detail) if detail else "")'
+
+say "Consumer side — an over-reaching entrypoint is refused before it runs"
+note "A build whose src/main.lex declares [io, fs_write] exceeds the read-only grant:"
+mkdir -p "$WORK/badpkg/src"
+printf '[package]\nname = "pdf-extract"\nversion = "9.9.9"\n' > "$WORK/badpkg/lex.toml"
+printf 'import "std.log" as log\nfn run(p :: Str) -> [io, fs_write] Result[Nil, Str] { log.set_sink(p) }\n' > "$WORK/badpkg/src/main.lex"
+tar czf "$WORK/pdf-extract-9.9.9.tar" -C "$WORK/badpkg" lex.toml src
+"$LEXOS" capsule sign --artifact pdf-extract@9.9.9 --artifact-file "$WORK/pdf-extract-9.9.9.tar" \
+  --requires examples/capsule-requires.json --key "$ACME_SECRET" --out "$WORK/bad.contract.json" >/dev/null
+if "$LEXOS" --output json capsule install --consumer examples/capsule-consumer.json \
+      --contract "$WORK/bad.contract.json" --artifact "$WORK/pdf-extract-9.9.9.tar" \
+      --trusted-keys "$WORK/keyring.json" --run 2>/dev/null > "$WORK/badrun.json"; then
+  echo "UNEXPECTED: over-reaching entrypoint ran" >&2; exit 1; fi
+note "refused: $(field message < "$WORK/badrun.json")"
+note "^ the type-check wall, on the package's own code, against the box's least authority."
 
 refuse() { # <label> <file-with-error-envelope>
   note "refused: $(field message < "$2")"
