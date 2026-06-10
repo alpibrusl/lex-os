@@ -58,6 +58,11 @@ const HELP_PATHS: &[&[&str]] = &[
     &["audit", "render"],
     &["audit", "tail"],
     &["check"],
+    &["capsule"],
+    &["capsule", "keygen"],
+    &["capsule", "sign"],
+    &["capsule", "verify"],
+    &["capsule", "install"],
     &["introspect"],
 ];
 

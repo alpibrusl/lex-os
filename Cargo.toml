@@ -5,6 +5,7 @@ members = [
     "crates/lex-os-audit",
     "crates/lex-os-perimeter",
     "crates/lex-os-resolver",
+    "crates/lex-os-capsule",
     "crates/lex-os-supervisor",
     "crates/lex-os-check",
     "crates/lex-os",
@@ -29,6 +30,7 @@ lex-os-manifest = { path = "crates/lex-os-manifest", version = "0.1.0" }
 lex-os-audit = { path = "crates/lex-os-audit", version = "0.1.0" }
 lex-os-perimeter = { path = "crates/lex-os-perimeter", version = "0.1.0" }
 lex-os-resolver = { path = "crates/lex-os-resolver", version = "0.1.0" }
+lex-os-capsule = { path = "crates/lex-os-capsule", version = "0.1.0" }
 lex-os-supervisor = { path = "crates/lex-os-supervisor", version = "0.1.0" }
 lex-os-check = { path = "crates/lex-os-check", version = "0.1.0" }
 lex-os-proto = { path = "crates/lex-os-proto", version = "0.1.0" }
@@ -56,3 +58,8 @@ hex = "0.4"
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# Ed25519 over canonical capability-contract bytes (capability-addressed
+# distribution, lex-os#34). `rand_core` (0.6, the version ed25519-dalek 2.x
+# speaks) supplies the OS CSPRNG for keypair generation.
+ed25519-dalek = "2"
+rand_core = "0.6"

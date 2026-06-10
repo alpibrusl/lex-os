@@ -70,6 +70,7 @@ Two boundaries, kept strictly separate:
 | [`lex-os-check`](crates/lex-os-check) | The **type-check wall**: runs an agent's `.lex` program through the real Lex front-end (`lex-syntax` → `lex-ast` → `lex-types`) and refuses it if its declared effects exceed the grant — *before* it runs. Backs the `check` command. |
 | [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: `SandboxPolicy::from_grant` is the single grant→OS-policy mapping. Pluggable isolation backends behind the `Perimeter` trait — a portable simulated one and a real Firecracker microVM (feature `firecracker`). |
 | [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied — every failure mode is an error, never a silent weakening. |
+| [`lex-os-capsule`](crates/lex-os-capsule) | **Capability-addressed distribution**: binds a distributable artifact to the trust **grant** it requires, signed (Ed25519). Installing it **narrows** a consumer's manifest — refuse, don't downgrade — so a third-party package runs at *least authority*, bounded by the consumer's grant rather than its own declaration. |
 | [`lex-os-supervisor`](crates/lex-os-supervisor) | The mediated command loop: capability + reversibility + **budget** gates, liveness, and **reprovision-on-death**. Also home to the scripted demo agent. |
 | [`lex-os-proto`](crates/lex-os-proto) | Wire protocol between the supervisor (host) and the agent running inside the microVM — vsock transport (`AF_VSOCK` guest side, Unix-socket host side; feature-gated). |
 | [`lex-os-guest`](crates/lex-os-guest) | The agent binary that runs **inside** the box: drives an LLM reasoning loop and relays each action to the supervisor for mediation. |
@@ -229,6 +230,50 @@ cargo run -p lex-os -- resolve --manifest examples/sudo-dangerous.json --namespa
 
 `run` and `resolve` both take `--namespaces-only` and `--offline` to
 simulate a weaker host and drive this path.
+
+## Capability-addressed distribution
+
+The box so far is dispatched by *its owner's* manifest. Distribution
+poses the next question: how do you safely run **someone else's**
+artifact — a package you didn't write — without trusting its author to be
+honest about what it does?
+
+The answer keeps [the one rule](#the-one-rule) intact: **the consumer's
+grant, never the publisher's declaration, is the ceiling.** A
+distributable artifact (a `lex pkg` package, addressed by its content
+hash) travels with a **capability contract** — the trust grant and egress
+it *declares* it needs — signed by the publisher (Ed25519). Installing it
+is not a new authority mechanism; it is the **narrowing wall**
+([above](#the-three-walls)) turned on distribution: the artifact's
+declared requirement must narrow the consumer's manifest, or it is
+refused. On the accepted path the box runs at `meet(consumer, requires)`
+— least authority, bounded below the consumer's grant, with egress
+restricted to exactly the hosts the artifact named.
+
+```sh
+cargo run -p lex-os -- capsule keygen --seed <hex32>     # an Ed25519 publisher key
+cargo run -p lex-os -- capsule sign \
+  --artifact lex-weather@1.2.0 --content-hash <sha256> \
+  --requires examples/capsule-requires.json --key <secret> --out contract.json
+cargo run -p lex-os -- capsule verify --contract contract.json  # check the signature
+cargo run -p lex-os -- capsule install \
+  --consumer examples/capsule-consumer.json --contract contract.json
+#   installs at the artifact's least authority, OR refuses (exit 8) when it
+#   asks for more than the consumer grants — e.g. exec it was never given
+```
+
+`bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
+package's required grant, a consumer installs it at least authority, and a
+compromised update, a tampered contract, and an unsatisfiable host are each
+refused. No KVM, root, or network needed; it runs against the simulated
+perimeter.
+
+`install` resolves the effective box and provisions it under the same
+*simulated* perimeter as `run`, so it is **not** a security boundary and
+says so (`security_boundary: false`). This is a first cut (lex-os#34): the
+signed grant and the refuse-don't-downgrade install hold end-to-end;
+binding the contract to real package bytes and a signer-trust policy are
+the open parts.
 
 ## The reversibility classification
 

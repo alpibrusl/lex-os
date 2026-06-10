@@ -1,0 +1,19 @@
+{
+  "goal": {
+    "description": "what pdf-extract@2.0.0 declares it needs",
+    "done_signal": null
+  },
+  "grant": {
+    "filesystem": "ReadOnly",
+    "network": "Allowlist",
+    "exec": "None"
+  },
+  "budget": {
+    "wall_clock_secs": 1,
+    "max_commands": 1,
+    "max_money_cents": 0,
+    "max_api_calls": 0
+  },
+  "isolation_floor": "Namespace",
+  "egress": ["api.acme-pdf.com"]
+}
