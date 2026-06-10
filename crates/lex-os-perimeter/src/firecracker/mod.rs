@@ -213,7 +213,11 @@ impl FirecrackerPerimeter {
                     api_sock_arg: "/fc.sock".into(),
                     kernel_arg: "/vmlinux".into(),
                     rootfs_arg: "/rootfs.ext4".into(),
-                    vsock_arg: if has_vsock { "/vsock.sock".into() } else { String::new() },
+                    vsock_arg: if has_vsock {
+                        "/vsock.sock".into()
+                    } else {
+                        String::new()
+                    },
                     vsock_host_base: if has_vsock {
                         root.join("vsock.sock")
                     } else {
@@ -261,6 +265,13 @@ impl FirecrackerPerimeter {
         };
         wait_for_socket(&lay.api_sock_host, Duration::from_secs(5)).map_err(perimeter_err)?;
 
+        // 3a. With the jailer up, its per-VM cgroup exists. Verify our teardown
+        //     path actually points at it: a jailer that renamed the cgroup tree
+        //     must fail loudly here, not leak a cgroup per box at teardown.
+        if let Some(cfg) = &self.assets.jail {
+            jail::verify_cgroup_dir(cfg).map_err(perimeter_err)?;
+        }
+
         // 3b. Stage assets into the freshly-created chroot (jailed only). Kernel
         //     is hard-linked (read-only, shared is fine); the rootfs is copied
         //     so each box gets its own writable disk — the original asset is
@@ -282,8 +293,10 @@ impl FirecrackerPerimeter {
             r#"{{"drive_id":"rootfs","path_on_host":"{}","is_root_device":true,"is_read_only":false}}"#,
             lay.rootfs_arg
         );
-        with_socket(&lay.api_sock_host, |s| put_json(s, "/drives/rootfs", &drive))
-            .map_err(perimeter_err)?;
+        with_socket(&lay.api_sock_host, |s| {
+            put_json(s, "/drives/rootfs", &drive)
+        })
+        .map_err(perimeter_err)?;
 
         // 6. Network interface (the tap already exists, step 2).
         let net = format!(

@@ -52,6 +52,27 @@ pub(super) fn cgroup_v2_dir(cfg: &JailConfig) -> PathBuf {
         .join(&cfg.id)
 }
 
+/// Confirm the guessed [`cgroup_v2_dir`] actually exists once the jailer has
+/// launched (it creates the cgroup before exec'ing firecracker, so it is
+/// present by the time the API socket answers). The path is a *guess* of
+/// jailer's naming; if a jailer upgrade changes it, our teardown would delete
+/// nothing and silently leak the real cgroup on every box. Asserting it here
+/// turns that drift into a loud launch-time error instead — *refuse, don't
+/// downgrade*.
+pub(super) fn verify_cgroup_dir(cfg: &JailConfig) -> Result<(), String> {
+    let dir = cgroup_v2_dir(cfg);
+    if dir.is_dir() {
+        Ok(())
+    } else {
+        Err(format!(
+            "jailer cgroup not found at the expected path `{}` after launch — \
+             jailer's cgroup naming has likely drifted, so teardown would leak it. \
+             Update `firecracker::jail::cgroup_v2_dir` to match the installed jailer.",
+            dir.display()
+        ))
+    }
+}
+
 /// Build the jailer argv. Everything after `--` is firecracker's own args;
 /// `api_sock_in_jail` is the socket path *as firecracker sees it* (relative to
 /// the chroot root, e.g. `/fc.sock`).
@@ -99,6 +120,22 @@ mod tests {
         assert_eq!(
             chroot_root(&cfg()),
             PathBuf::from("/srv/jail/firecracker/lexbox/root")
+        );
+    }
+
+    #[test]
+    fn verify_cgroup_dir_errors_when_the_guessed_path_is_absent() {
+        // A bogus id can't have a cgroup under /sys/fs/cgroup/firecracker/, so
+        // the post-launch check must refuse with an actionable message rather
+        // than let teardown silently leak. (The happy path needs a real jailed
+        // launch and is exercised by demo/wall2.sh on a KVM host.)
+        let mut c = cfg();
+        c.id = "definitely-not-a-live-jail-7f3a91".into();
+        let err = verify_cgroup_dir(&c).expect_err("absent cgroup must error");
+        assert!(err.contains("definitely-not-a-live-jail-7f3a91"));
+        assert!(
+            err.contains("cgroup_v2_dir"),
+            "message should point at the fix"
         );
     }
 
