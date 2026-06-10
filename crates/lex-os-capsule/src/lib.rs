@@ -115,27 +115,51 @@ impl CapabilityContract {
         self
     }
 
-    /// Canonical JSON used for hashing and signing. Field order is fixed,
-    /// the grant is encoded by *rank* (so `Sandboxed`/`ReadOnly` aliases
-    /// address identically, matching [`Grant::content_id`]), and egress is
-    /// sorted — so the bytes are reproducible across processes and languages.
+    /// Canonical JSON used for hashing and signing. The grant is encoded by
+    /// *rank* (so `Sandboxed`/`ReadOnly` aliases address identically, matching
+    /// [`Grant::content_id`]) and egress is sorted.
+    ///
+    /// Field order is fixed by serializing a dedicated struct, **not** a
+    /// `serde_json::Value`: a `Value` object's key order depends on
+    /// serde_json's `preserve_order` feature, which any transitive dependency
+    /// can switch on and silently change every [`ContractId`]. A `ContractId`
+    /// is a permanent identifier, so these bytes must not depend on a build
+    /// flag — `canonical_form_is_pinned` locks the exact output in CI.
     pub fn canonical_json(&self) -> String {
+        #[derive(Serialize)]
+        struct CanonArtifact<'a> {
+            name: &'a str,
+            version: &'a str,
+            content_hash: &'a str,
+        }
+        #[derive(Serialize)]
+        struct CanonRequires {
+            filesystem: u8,
+            network: u8,
+            exec: u8,
+        }
+        #[derive(Serialize)]
+        struct Canon<'a> {
+            artifact: CanonArtifact<'a>,
+            requires: CanonRequires,
+            egress: Vec<String>,
+        }
         let mut egress = self.egress.clone();
         egress.sort();
-        let v = serde_json::json!({
-            "artifact": {
-                "name": self.artifact.name,
-                "version": self.artifact.version,
-                "content_hash": self.artifact.content_hash,
+        let canon = Canon {
+            artifact: CanonArtifact {
+                name: &self.artifact.name,
+                version: &self.artifact.version,
+                content_hash: &self.artifact.content_hash,
             },
-            "requires": {
-                "filesystem": self.requires.filesystem.rank(),
-                "network": self.requires.network.rank(),
-                "exec": self.requires.exec.rank(),
+            requires: CanonRequires {
+                filesystem: self.requires.filesystem.rank(),
+                network: self.requires.network.rank(),
+                exec: self.requires.exec.rank(),
             },
-            "egress": egress,
-        });
-        serde_json::to_string(&v).expect("contract json is always serializable")
+            egress,
+        };
+        serde_json::to_string(&canon).expect("contract canonical json is always serializable")
     }
 
     /// The exact bytes that get signed and verified: the domain separator
@@ -236,8 +260,11 @@ impl SignedContract {
 
 /// A consumer's set of trusted publisher public keys (hex Ed25519). A valid
 /// signature proves *who* signed a contract; the keyring decides whether that
-/// signer is *allowed*. Without one, any valid signature is accepted —
-/// trust-on-first-use, which the CLI warns about.
+/// signer is *allowed*. Without one, any valid signature from *any* key is
+/// accepted — **any-signer mode** (not trust-on-first-use: nothing is pinned,
+/// so there is no first-seen key to compare against), which the CLI warns
+/// about. A persistent pin-on-first-use policy would be a strictly better
+/// floor — tracked as a follow-up on lex-os#36.
 ///
 /// This is deliberately the simplest trust policy: an explicit allowlist of
 /// keys. Earning trust from a publisher's track record (tying the signer into
@@ -273,18 +300,41 @@ impl Keyring {
     }
 }
 
-/// Options narrowing how a capsule is installed: optional artifact-byte
-/// integrity and an optional trusted-signer keyring. Both default to *off*
-/// (unverified bytes, trust-on-first-use) so [`Capsule::install`] stays the
-/// simplest call; the CLI surfaces both and warns when either is skipped.
+/// Options selecting how strictly a capsule is installed: optional
+/// artifact-byte integrity and an optional trusted-signer keyring. There is no
+/// safe universal default — verification needs inputs the caller must supply —
+/// so [`Capsule::install`] takes these *explicitly*. Construct with
+/// [`InstallOptions::verified`] (the recommended path) or, to opt out of one or
+/// both checks, [`InstallOptions::unverified`] (named so the weak choice is
+/// never hidden behind a friendly call).
 #[derive(Default)]
 pub struct InstallOptions<'a> {
     /// The artifact archive bytes. When present, their SHA-256 must equal the
-    /// contract's `content_hash` or install is refused.
+    /// contract's `content_hash` or install is refused. `None` skips the byte
+    /// check — the `content_hash` is then a promise about bytes never checked.
     pub artifact_bytes: Option<&'a [u8]>,
     /// Trusted publisher keyring. When present, the verified signer must be in
-    /// it or install is refused.
+    /// it or install is refused. `None` is **any-signer mode**: any valid
+    /// signature from *any* key is accepted (this is not trust-on-first-use —
+    /// nothing is pinned).
     pub keyring: Option<&'a Keyring>,
+}
+
+impl<'a> InstallOptions<'a> {
+    /// The recommended path: verify the archive bytes against the contract and
+    /// require the signer to be in `keyring`.
+    pub fn verified(artifact_bytes: &'a [u8], keyring: &'a Keyring) -> Self {
+        Self {
+            artifact_bytes: Some(artifact_bytes),
+            keyring: Some(keyring),
+        }
+    }
+
+    /// Opt out of byte integrity and/or signer authorization. Named so the
+    /// weak path is an explicit, visible choice — never the silent default.
+    pub fn unverified() -> Self {
+        Self::default()
+    }
 }
 
 /// The result of installing a capsule against a consumer manifest: the
@@ -353,19 +403,14 @@ fn decode_fixed<const N: usize>(s: &str, field: &'static str) -> Result<[u8; N],
 pub struct Capsule;
 
 impl Capsule {
-    /// Install `signed` against `consumer` with default options (unverified
-    /// artifact bytes, trust-on-first-use). See [`Capsule::install_with`] for
-    /// the full gate set; this is the simplest call.
-    pub fn install(
-        consumer: &Manifest,
-        signed: &SignedContract,
-    ) -> Result<InstalledCapsule, CapsuleError> {
-        Self::install_with(consumer, signed, &InstallOptions::default())
-    }
-
     /// Install `signed` against `consumer`, producing the effective box to
-    /// provision. Gates, in order — each a hard refusal, never a silent
-    /// downgrade:
+    /// provision. The verification posture is an **explicit** argument: there
+    /// is no convenience overload that silently skips checks, so a caller can't
+    /// reach for a friendly name and get the weak path. Pass
+    /// [`InstallOptions::verified`] for the recommended path, or the named
+    /// [`InstallOptions::unverified`] to opt out.
+    ///
+    /// Gates, in order — each a hard refusal, never a silent downgrade:
     ///
     /// 1. **Authenticity.** The signature must verify for the declared key.
     /// 2. **Authorization.** If `opts.keyring` is set, the verified signer
@@ -382,7 +427,7 @@ impl Capsule {
     ///    `meet(consumer, requires)` (== `requires` here, always ≤ consumer),
     ///    and egress is the artifact's declared subset — the box gets only
     ///    what the artifact said it needs, never the consumer's full grant.
-    pub fn install_with(
+    pub fn install(
         consumer: &Manifest,
         signed: &SignedContract,
         opts: &InstallOptions<'_>,
@@ -519,8 +564,8 @@ mod tests {
         .with_egress(vec!["api.weather.example".into()])
         .sign(&key());
 
-        let installed =
-            Capsule::install(&consumer(), &signed).expect("narrowing artifact installs");
+        let installed = Capsule::install(&consumer(), &signed, &InstallOptions::unverified())
+            .expect("narrowing artifact installs");
         // Effective grant is the artifact's least authority, ≤ consumer.
         assert_eq!(
             installed.effective_grant,
@@ -542,7 +587,8 @@ mod tests {
             Grant::new(Level::ReadOnly, Level::None, Level::Full),
         )
         .sign(&key());
-        let err = Capsule::install(&consumer(), &signed).unwrap_err();
+        let err =
+            Capsule::install(&consumer(), &signed, &InstallOptions::unverified()).unwrap_err();
         assert!(
             matches!(err, CapsuleError::Refused(ManifestError::Trust(_))),
             "expected a refusal naming the exec widening, got {err:?}"
@@ -558,7 +604,8 @@ mod tests {
         )
         .with_egress(vec!["telemetry.evil.example".into()])
         .sign(&key());
-        let err = Capsule::install(&consumer(), &signed).unwrap_err();
+        let err =
+            Capsule::install(&consumer(), &signed, &InstallOptions::unverified()).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -581,7 +628,7 @@ mod tests {
         // Claim a different signer than the one that actually signed.
         forged.signer = hex::encode(signing_key_from_seed(&[9u8; 32]).verifying_key().to_bytes());
         assert!(matches!(
-            Capsule::install(&consumer(), &forged).unwrap_err(),
+            Capsule::install(&consumer(), &forged, &InstallOptions::unverified()).unwrap_err(),
             CapsuleError::SignatureInvalid
         ));
     }
@@ -600,6 +647,33 @@ mod tests {
         );
         assert_eq!(c1.content_id(), c2.content_id());
         assert_eq!(c1.content_id().0.len(), 64);
+    }
+
+    #[test]
+    fn canonical_form_is_pinned() {
+        // A ContractId is a permanent identifier; its bytes must not drift with
+        // a serde_json feature flag or a refactor. This golden test pins the
+        // exact canonical form and hash for a known contract — any change here
+        // is a CI failure, not a silent re-addressing of every contract.
+        let c = CapabilityContract::new(
+            ArtifactRef::new("pkg", "1.0.0", "ff".repeat(32)),
+            Grant::new(Level::ReadOnly, Level::Allowlist, Level::None),
+        )
+        // Deliberately unsorted: canonicalization must sort egress.
+        .with_egress(vec!["b.example".into(), "a.example".into()]);
+
+        let expected_json = concat!(
+            "{\"artifact\":{\"name\":\"pkg\",\"version\":\"1.0.0\",",
+            "\"content_hash\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},",
+            "\"requires\":{\"filesystem\":1,\"network\":2,\"exec\":0},",
+            "\"egress\":[\"a.example\",\"b.example\"]}"
+        );
+        assert_eq!(c.canonical_json(), expected_json, "canonical form drifted");
+        assert_eq!(
+            c.content_id().0,
+            "5785e610646249e3a67b6596a391772f845b72ea4e4e5e5cd3577d53deb8727d",
+            "ContractId drifted — a permanent identifier changed"
+        );
     }
 
     #[test]
@@ -641,13 +715,13 @@ mod tests {
             artifact_bytes: Some(real),
             keyring: None,
         };
-        assert!(Capsule::install_with(&consumer(), &signed, &ok).is_ok());
+        assert!(Capsule::install(&consumer(), &signed, &ok).is_ok());
         let tampered = InstallOptions {
             artifact_bytes: Some(b"swapped payload"),
             keyring: None,
         };
         assert!(matches!(
-            Capsule::install_with(&consumer(), &signed, &tampered).unwrap_err(),
+            Capsule::install(&consumer(), &signed, &tampered).unwrap_err(),
             CapsuleError::ArtifactHashMismatch { .. }
         ));
     }
@@ -668,7 +742,7 @@ mod tests {
             artifact_bytes: None,
             keyring: Some(&trusting),
         };
-        assert!(Capsule::install_with(&consumer(), &signed, &ok).is_ok());
+        assert!(Capsule::install(&consumer(), &signed, &ok).is_ok());
 
         // A keyring that trusts only some *other* key: refused as untrusted,
         // even though the signature is valid and the capability would fit.
@@ -679,7 +753,7 @@ mod tests {
             keyring: Some(&stranger),
         };
         assert!(matches!(
-            Capsule::install_with(&consumer(), &signed, &no).unwrap_err(),
+            Capsule::install(&consumer(), &signed, &no).unwrap_err(),
             CapsuleError::UntrustedSigner { .. }
         ));
     }
@@ -701,7 +775,8 @@ mod tests {
             Grant::new(Level::ReadOnly, Level::None, Level::None),
         )
         .sign(&key());
-        let installed = Capsule::install(&consumer(), &signed).unwrap();
+        let installed =
+            Capsule::install(&consumer(), &signed, &InstallOptions::unverified()).unwrap();
         assert_eq!(
             installed.effective_grant,
             Grant::new(Level::ReadOnly, Level::None, Level::None)

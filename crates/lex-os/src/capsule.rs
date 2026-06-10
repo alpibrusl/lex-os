@@ -96,8 +96,8 @@ pub enum CapsuleCmd {
         #[arg(long)]
         artifact: Option<PathBuf>,
         /// A trusted-keys JSON keyring (`{"trusted":["<hex>",…]}`); the signer
-        /// must be in it. Omit to accept any valid signature (trust-on-first-use,
-        /// warned).
+        /// must be in it. Omit for any-signer mode: any valid signature from any
+        /// key is accepted (warned; this is not trust-on-first-use).
         #[arg(long)]
         trusted_keys: Option<PathBuf>,
         /// Write a tamper-evident audit log of the install decision (request →
@@ -385,7 +385,7 @@ fn install(
         None => {
             eprintln!(
                 "⚠  signer NOT checked against a trusted keyring — any valid signature is \
-                 accepted (trust-on-first-use). Pass --trusted-keys <keyring.json> to pin publishers."
+                 accepted (any-signer mode — not trust-on-first-use). Pass --trusted-keys <keyring.json> to pin publishers."
             );
             None
         }
@@ -406,7 +406,7 @@ fn install(
     });
 
     // The gate: authenticity → trusted signer → artifact bytes → narrow.
-    let installed = match Capsule::install_with(&consumer, &signed, &opts) {
+    let installed = match Capsule::install(&consumer, &signed, &opts) {
         Ok(i) => i,
         // Distinguish authenticity / authorization / integrity / capability
         // failures so the exit code and message are honest about *why*. Every
