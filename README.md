@@ -284,7 +284,20 @@ Every install decision — accepted or refused — is recorded in the same
 **hash-chained audit log** as the mediation loop (`--audit-out`, then
 `lex-os audit verify`): `capsule_requested` is logged *before* any gate
 decides, then `capsule_installed` or `capsule_refused` with the reason. An
-agent editing that record breaks the chain.
+agent editing that record breaks the chain. An accepted record names the
+exact bytes that installed (`content_hash`, the publish-time identity) and
+its signer, so it stands on its own as evidence — not just a `name@version`
+label.
+
+That record need not stay a throwaway file: `lex attest import-install
+--audit install.audit.json` promotes every `capsule_installed` event into a
+durable, content-addressed attestation in the lex-lang **attestation
+graph**, keyed under the publisher's signing key. There it is queryable
+(`lex attest filter --kind capsule_install`, `lex blame`) and becomes earned
+track record — `lex producer-trust recompute --tool <signer>` folds real
+installs into the signer's trust score, feeding the very `lex producer-trust
+keyring` that the next `capsule install --trusted-keys` consumes. The loop
+closes: install → attestation → earned trust → keyring → next install.
 
 With `--run`, install runs the package's **real entrypoint** under the
 effective manifest: it extracts `src/main.lex` from the verified archive,
@@ -311,11 +324,11 @@ as `run`, so it is **not** a security boundary and says so
 (`security_boundary: false`). Still open (lex-os#36): actually interpreting
 the entrypoint's Lex in-box (lex-runtime) or running it on a real
 rootfs+exec under Firecracker — `--run` today mediates the capabilities the
-type-checked entrypoint *declares*; fetching the artifact from a registry
-rather than a local file; and promoting the audit record into a publish-time
-attestation queryable via `lex blame`. (Earning signer trust from a
-publisher's track record rather than a pinned keyring is now available via
-`lex producer-trust keyring` — see above.)
+type-checked entrypoint *declares*; and fetching the artifact from a registry
+rather than a local file. (Two follow-ups are now delivered: earning signer
+trust from a publisher's track record via `lex producer-trust keyring`, and
+promoting the install record into a publish-time attestation queryable via
+`lex blame` / `lex attest filter` — both described above.)
 
 ## The reversibility classification
 

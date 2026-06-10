@@ -683,6 +683,7 @@ mod tests {
         seed.append(Event::CapsuleInstalled {
             artifact: "pdf-extract@2.0.0".into(),
             signer: "abc".into(),
+            content_hash: "deadbeef".into(),
             effective_grant: "fs=read-only net=none exec=none".into(),
         });
         let seed_head = seed.head();

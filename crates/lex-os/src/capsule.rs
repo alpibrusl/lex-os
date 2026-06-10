@@ -403,6 +403,7 @@ fn install(
     audit.append(Event::CapsuleRequested {
         artifact: label.clone(),
         signer: signed.signer.clone(),
+        content_hash: signed.contract.artifact.content_hash.clone(),
     });
 
     // The gate: authenticity → trusted signer → artifact bytes → narrow.
@@ -494,6 +495,7 @@ fn install(
         audit.append(Event::CapsuleInstalled {
             artifact: label.clone(),
             signer: installed.signer.clone(),
+            content_hash: installed.artifact.content_hash.clone(),
             effective_grant: installed.effective_grant.pretty(),
         });
         let workload = commands_for_effects(&report.effects);
@@ -528,6 +530,7 @@ fn install(
     audit.append(Event::CapsuleInstalled {
         artifact: label.clone(),
         signer: installed.signer.clone(),
+        content_hash: installed.artifact.content_hash.clone(),
         effective_grant: installed.effective_grant.pretty(),
     });
     write_audit(&audit, &audit_out);
