@@ -5,7 +5,7 @@
 //! perimeter seam that the library unit tests don't reach.
 
 use lex_os_capsule::{
-    signing_key_from_seed, ArtifactRef, CapabilityContract, Capsule, CapsuleError,
+    signing_key_from_seed, ArtifactRef, CapabilityContract, Capsule, CapsuleError, InstallOptions,
 };
 use lex_os_manifest::{Budget, Goal, Grant, Level, Manifest};
 use lex_os_perimeter::{Perimeter, SandboxPolicy, SimulatedPerimeter};
@@ -30,7 +30,8 @@ fn accepted_capsule_resolves_and_provisions_a_live_box() {
     .with_egress(vec!["api.weather.example".into()])
     .sign(&key);
 
-    let installed = Capsule::install(&consumer(), &signed).expect("narrowing capsule installs");
+    let installed = Capsule::install(&consumer(), &signed, &InstallOptions::unverified())
+        .expect("narrowing capsule installs");
 
     // The effective manifest must resolve on a full host and provision a box.
     let plan = resolve(&installed.manifest, &Environment::full()).expect("effective box resolves");
@@ -65,7 +66,7 @@ fn refused_capsule_never_yields_a_box() {
     )
     .sign(&key);
 
-    let err = Capsule::install(&consumer(), &signed).unwrap_err();
+    let err = Capsule::install(&consumer(), &signed, &InstallOptions::unverified()).unwrap_err();
     assert!(
         matches!(err, CapsuleError::Refused(_)),
         "overreaching capsule must be refused before any box exists, got {err:?}"

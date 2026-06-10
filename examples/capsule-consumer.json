@@ -11,7 +11,7 @@
   "budget": {
     "wall_clock_secs": 300,
     "max_commands": 200,
-    "max_money_cents": 0,
+    "max_money_cents": 100,
     "max_api_calls": 100
   },
   "isolation_floor": "Gvisor",

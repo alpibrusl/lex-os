@@ -689,6 +689,7 @@ dependencies = [
  "acli",
  "anyhow",
  "clap",
+ "flate2",
  "hex",
  "lex-os-audit",
  "lex-os-capsule",
@@ -700,6 +701,7 @@ dependencies = [
  "lex-os-supervisor",
  "serde",
  "serde_json",
+ "tar",
  "ureq 2.12.1",
 ]
 

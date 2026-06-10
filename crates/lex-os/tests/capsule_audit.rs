@@ -64,6 +64,28 @@ fn example(name: &str) -> String {
         .to_string()
 }
 
+/// Build a minimal `lex pkg` archive (gzip tar: `lex.toml` + `src/main.lex`)
+/// at `path`, with `main_lex` as the entrypoint program.
+fn make_package(path: &str, main_lex: &str) {
+    fn append(ar: &mut tar::Builder<flate2::write::GzEncoder<Vec<u8>>>, name: &str, data: &[u8]) {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        ar.append_data(&mut h, name, data).unwrap();
+    }
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut ar = tar::Builder::new(gz);
+    append(
+        &mut ar,
+        "lex.toml",
+        b"[package]\nname = \"pdf-extract\"\nversion = \"2.0.0\"\n",
+    );
+    append(&mut ar, "src/main.lex", main_lex.as_bytes());
+    let bytes = ar.into_inner().unwrap().finish().unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
 #[test]
 fn accepted_install_writes_a_verifiable_log() {
     let s = Scratch::new("accept");
@@ -114,6 +136,141 @@ fn accepted_install_writes_a_verifiable_log() {
     // …and the standalone `audit verify` command agrees.
     let (_o, code) = run(&["audit", "verify", "--log", &log]);
     assert_eq!(code, 0, "`audit verify` should accept the written log");
+}
+
+#[test]
+fn install_run_executes_the_packages_entrypoint() {
+    let s = Scratch::new("run");
+    let secret = keygen(&"ac".repeat(32));
+    // A real package whose entrypoint declares [net] — within the read-only +
+    // allowlist effective grant.
+    let artifact = s.path("pdf-extract.tgz");
+    make_package(
+        &artifact,
+        "import \"std.net\" as net\nfn run(u :: Str) -> [net] Result[Str, Str] { net.get(u) }\n",
+    );
+    let contract = s.path("contract.json");
+    let log = s.path("run.audit.json");
+
+    run(&[
+        "capsule",
+        "sign",
+        "--artifact",
+        "pdf-extract@2.0.0",
+        "--artifact-file",
+        &artifact,
+        "--requires",
+        &example("capsule-requires.json"),
+        "--key",
+        &secret,
+        "--out",
+        &contract,
+    ]);
+
+    let (out, code) = run(&[
+        "--output",
+        "json",
+        "capsule",
+        "install",
+        "--consumer",
+        &example("capsule-consumer.json"),
+        "--contract",
+        &contract,
+        "--artifact",
+        &artifact,
+        "--audit-out",
+        &log,
+        "--run",
+    ]);
+    assert_eq!(
+        code, 0,
+        "install --run should reach a terminal outcome and exit 0"
+    );
+    // The entrypoint's real declared effects drove the workload.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["data"]["entrypoint"], "src/main.lex");
+    assert_eq!(v["data"]["workload"][0], "net.fetch");
+
+    let audit = AuditLog::from_json(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert!(
+        audit.verify().is_ok(),
+        "the one install+session chain must verify"
+    );
+    let nd = audit.to_ndjson().unwrap();
+    assert!(nd.contains("capsule_installed"));
+    assert!(
+        nd.contains("provisioned"),
+        "the session provisioned the box"
+    );
+    assert!(
+        nd.contains("net.fetch"),
+        "the entrypoint's net effect was mediated"
+    );
+    assert!(
+        nd.contains("session_ended"),
+        "the session reached a terminal state"
+    );
+}
+
+#[test]
+fn install_run_refuses_an_overreaching_entrypoint() {
+    let s = Scratch::new("overreach");
+    let secret = keygen(&"ac".repeat(32));
+    // Entrypoint declares [io, fs_write]; the effective grant is read-only, so
+    // the type-check wall must refuse it before anything runs.
+    let artifact = s.path("evil.tgz");
+    make_package(
+        &artifact,
+        "import \"std.log\" as log\nfn run(p :: Str) -> [io, fs_write] Result[Nil, Str] { log.set_sink(p) }\n",
+    );
+    let contract = s.path("contract.json");
+    let log = s.path("evil.audit.json");
+
+    run(&[
+        "capsule",
+        "sign",
+        "--artifact",
+        "pdf-extract@9.9.9",
+        "--artifact-file",
+        &artifact,
+        "--requires",
+        &example("capsule-requires.json"),
+        "--key",
+        &secret,
+        "--out",
+        &contract,
+    ]);
+
+    let (_o, code) = run(&[
+        "capsule",
+        "install",
+        "--consumer",
+        &example("capsule-consumer.json"),
+        "--contract",
+        &contract,
+        "--artifact",
+        &artifact,
+        "--audit-out",
+        &log,
+        "--run",
+    ]);
+    assert_eq!(code, 8, "an over-reaching entrypoint is refused (exit 8)");
+
+    let audit = AuditLog::from_json(&std::fs::read_to_string(&log).unwrap()).unwrap();
+    assert!(audit.verify().is_ok());
+    let nd = audit.to_ndjson().unwrap();
+    // Refused before running: request → refused, no spurious install or session.
+    assert!(nd.contains("capsule_requested"));
+    assert!(nd.contains("capsule_refused"));
+    assert!(
+        nd.contains("fs_write"),
+        "the reason names the over-reaching effect"
+    );
+    assert!(!nd.contains("session_ended"), "nothing ran");
+    assert!(
+        !nd.contains("capsule_installed"),
+        "it was refused, not installed"
+    );
 }
 
 #[test]

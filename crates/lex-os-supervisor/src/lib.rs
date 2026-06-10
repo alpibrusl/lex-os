@@ -193,6 +193,11 @@ pub struct Supervisor<P: Perimeter, C: Clock> {
     perimeter: P,
     clock: C,
     limits: Limits,
+    /// An optional pre-existing audit log to continue. When set, the
+    /// session's events chain onto it instead of a fresh `GENESIS` log —
+    /// so a caller that already recorded a decision (e.g. a capsule
+    /// install) gets one unbroken chain through the session it authorized.
+    seed_audit: Option<AuditLog>,
 }
 
 impl<P: Perimeter, C: Clock> Supervisor<P, C> {
@@ -209,7 +214,17 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
             perimeter,
             clock,
             limits,
+            seed_audit: None,
         }
+    }
+
+    /// Continue an existing audit log rather than starting a fresh one.
+    /// The session's events chain onto `audit`'s current head, giving the
+    /// caller a single tamper-evident record across the decision and the
+    /// session it led to.
+    pub fn with_seed_audit(mut self, audit: AuditLog) -> Self {
+        self.seed_audit = Some(audit);
+        self
     }
 
     /// Drive an agent to a terminal [`Outcome`]. This is the one
@@ -226,7 +241,9 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         // is carried into the perimeter (the resolver still validates the
         // environment, but the authoritative policy comes from here).
         let policy = SandboxPolicy::from_manifest(&self.manifest);
-        let mut audit = AuditLog::new();
+        // Continue a seeded log if the caller provided one (the capsule
+        // install decision), else start fresh from GENESIS.
+        let mut audit = self.seed_audit.take().unwrap_or_default();
         let mut ledger = BudgetLedger::new(self.manifest.budget, self.clock.now_secs());
         let mut checkpoint = Checkpoint::default();
         let mut reprovisions = 0u32;
@@ -656,6 +673,50 @@ mod tests {
         let report = sup.run(&Environment::full(), &mut agent).unwrap();
         assert_eq!(report.outcome, Outcome::BudgetExhausted("api_calls".into()));
         assert_eq!(report.ledger.api_calls_used(), 1);
+    }
+
+    #[test]
+    fn seed_audit_chains_the_session_onto_an_existing_log() {
+        // A caller (e.g. capsule install) already recorded a decision; the
+        // session must continue that chain, not start fresh from GENESIS.
+        let mut seed = AuditLog::new();
+        seed.append(Event::CapsuleInstalled {
+            artifact: "pdf-extract@2.0.0".into(),
+            signer: "abc".into(),
+            effective_grant: "fs=read-only net=none exec=none".into(),
+        });
+        let seed_head = seed.head();
+        let seed_len = seed.len();
+
+        let m = manifest(
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        )
+        .with_seed_audit(seed);
+        let mut agent =
+            ScriptedAgent::new(vec![AgentAction::Run("fs.read".into()), AgentAction::Done]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+
+        // One unbroken chain: the seeded entry, then the session's events.
+        assert!(report.audit.verify().is_ok());
+        assert!(report.audit.len() > seed_len);
+        assert!(matches!(
+            report.audit.entries()[0].event,
+            Event::CapsuleInstalled { .. }
+        ));
+        // The first session entry chains onto the seed's head.
+        assert_eq!(report.audit.entries()[seed_len].prev_hash, seed_head);
+        let nd = report.audit.to_ndjson().unwrap();
+        assert!(nd.contains("capsule_installed"));
+        assert!(nd.contains("provisioned"));
+        assert!(nd.contains("session_ended"));
     }
 
     #[test]
