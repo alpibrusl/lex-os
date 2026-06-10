@@ -44,7 +44,7 @@ secret_of() { "$LEXOS" --output json capsule keygen --seed "$1" | field secret_k
 # + src/main.lex. Its entrypoint declares [net] — within pdf-extract's grant.
 mkdir -p "$WORK/pkg/src"
 printf '[package]\nname = "pdf-extract"\nversion = "2.0.0"\n' > "$WORK/pkg/lex.toml"
-printf 'import "std.net" as net\nfn run(u :: Str) -> [net] Result[Str, Str] { net.get(u) }\n' > "$WORK/pkg/src/main.lex"
+printf 'import "std.net" as net\nfn main() -> [net] Result[Str, Str] { net.get("https://results.demo.internal/submit") }\n' > "$WORK/pkg/src/main.lex"
 tar czf "$WORK/pdf-extract-2.0.0.tar" -C "$WORK/pkg" lex.toml src
 
 say "Publisher identities"
@@ -90,14 +90,15 @@ note "hash chain verifies: $verified  (an agent editing this log breaks the chai
 
 say "Consumer side — run the package's real entrypoint under the effective grant (--run)"
 note "install --run extracts src/main.lex from the verified archive, type-checks it"
-note "against the effective grant, and drives the session from its declared effects."
+note "against the effective grant, then INTERPRETS it in-box (lex-bytecode) — routing"
+note "every effect it performs through the supervisor's mediation gate."
 "$LEXOS" --output json capsule install \
   --consumer examples/capsule-consumer.json \
   --contract "$WORK/pdf-extract.contract.json" \
   --artifact "$WORK/pdf-extract-2.0.0.tar" \
   --trusted-keys "$WORK/keyring.json" \
   --audit-out "$WORK/run.audit.json" --run 2>/dev/null > "$WORK/ran.json"
-note "entrypoint: $(field entrypoint < "$WORK/ran.json")  | declared effects: $(field entrypoint_effects < "$WORK/ran.json")  | outcome: $(field outcome < "$WORK/ran.json")"
+note "entrypoint: $(field entrypoint < "$WORK/ran.json")  | execution: $(field execution < "$WORK/ran.json")  | effects performed: $(field effects_performed < "$WORK/ran.json")  | ran ok: $(field run_ok < "$WORK/ran.json")"
 note "one chain of $(field audit_entries < "$WORK/ran.json") entries (install decision → session), verified: $(field audit_verified < "$WORK/ran.json")"
 "$LEXOS" audit render --log "$WORK/run.audit.json" | python3 -c '
 import sys, json

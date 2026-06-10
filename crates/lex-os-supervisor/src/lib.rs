@@ -384,6 +384,36 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
     /// even a denied or budget-blocked attempt is in the legible
     /// history.
     fn mediate(&self, name: &str, audit: &mut AuditLog, ledger: &mut BudgetLedger) -> Decision {
+        Mediator::new(&self.registry, &self.perimeter, &self.clock).mediate(name, audit, ledger)
+    }
+}
+
+/// The per-command mediation gate, lifted out of the agent loop so an in-box
+/// interpreter can apply the *same* gate to every effect a program performs
+/// (the registry leg's successor — real in-box execution). It borrows the
+/// supervisor's authority sources and owns no session state: the audit log and
+/// budget ledger are threaded in by the caller, exactly as [`Supervisor::run`]
+/// does, so the load-bearing order — log → reversibility → perimeter → budget →
+/// charge → allow — stays defined in one place. `Supervisor::mediate` delegates
+/// here, so this *is* the supervisor's gate, not a second copy of it.
+pub struct Mediator<'a, P: Perimeter, C: Clock> {
+    registry: &'a CommandRegistry,
+    perimeter: &'a P,
+    clock: &'a C,
+}
+
+impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
+    pub fn new(registry: &'a CommandRegistry, perimeter: &'a P, clock: &'a C) -> Self {
+        Self {
+            registry,
+            perimeter,
+            clock,
+        }
+    }
+
+    /// Apply the gate to one command, appending the same events and returning
+    /// the same [`Decision`] the supervisor loop would.
+    pub fn mediate(&self, name: &str, audit: &mut AuditLog, ledger: &mut BudgetLedger) -> Decision {
         let Some(cmd) = self.registry.get(name) else {
             audit.append(Event::CommandRequested {
                 seq: ledger.commands_used(),
