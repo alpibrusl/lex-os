@@ -232,16 +232,17 @@ Options:
 ===== lex-os capsule sign =====
 Sign a capability contract: bind an artifact to the grant + egress it requires (taken from a manifest's grant), with the publisher's key
 
-Usage: lex-os capsule sign [OPTIONS] --artifact <ARTIFACT> --content-hash <CONTENT_HASH> --requires <REQUIRES> --key <KEY>
+Usage: lex-os capsule sign [OPTIONS] --artifact <ARTIFACT> --requires <REQUIRES> --key <KEY>
 
 Options:
-      --artifact <ARTIFACT>          Artifact identity as `name@version`
-      --output <OUTPUT>              Output format (text for humans, json for agents) [default: text] [possible values: text, json]
-      --content-hash <CONTENT_HASH>  Hex SHA-256 of the published package archive (its content address)
-      --requires <REQUIRES>          Manifest JSON whose grant + egress are the artifact's requirement
-      --key <KEY>                    Signing key as 32-byte hex (the secret printed by `keygen`)
-      --out <OUT>                    Write the signed contract JSON here (default: stdout)
-  -h, --help                         Print help
+      --artifact <ARTIFACT>            Artifact identity as `name@version`
+      --output <OUTPUT>                Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --content-hash <CONTENT_HASH>    Hex SHA-256 of the published package archive (its content address). Provide this or `--artifact-file`, not both
+      --artifact-file <ARTIFACT_FILE>  Path to the published archive; its SHA-256 becomes the content hash
+      --requires <REQUIRES>            Manifest JSON whose grant + egress are the artifact's requirement
+      --key <KEY>                      Signing key as 32-byte hex (the secret printed by `keygen`)
+      --out <OUT>                      Write the signed contract JSON here (default: stdout)
+  -h, --help                           Print help
 
 ===== lex-os capsule verify =====
 Verify a signed contract's Ed25519 signature
@@ -259,12 +260,14 @@ Install a signed contract against a consumer manifest: refuse if the artifact wa
 Usage: lex-os capsule install [OPTIONS] --consumer <CONSUMER> --contract <CONTRACT>
 
 Options:
-      --consumer <CONSUMER>  The consumer's manifest — the ceiling the artifact is bound by
-      --output <OUTPUT>      Output format (text for humans, json for agents) [default: text] [possible values: text, json]
-      --contract <CONTRACT>  The signed capability contract travelling with the artifact
-      --namespaces-only      Pretend the host can only do namespace isolation
-      --offline              Pretend the host has no outbound network
-  -h, --help                 Print help
+      --consumer <CONSUMER>          The consumer's manifest — the ceiling the artifact is bound by
+      --output <OUTPUT>              Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --contract <CONTRACT>          The signed capability contract travelling with the artifact
+      --artifact <ARTIFACT>          The artifact archive; its SHA-256 must match the contract's content hash, or install is refused. Omit to skip the byte check (a loud warning is printed)
+      --trusted-keys <TRUSTED_KEYS>  A trusted-keys JSON keyring (`{"trusted":["<hex>",…]}`); the signer must be in it. Omit to accept any valid signature (trust-on-first-use, warned)
+      --namespaces-only              Pretend the host can only do namespace isolation
+      --offline                      Pretend the host has no outbound network
+  -h, --help                         Print help
 
 ===== lex-os introspect =====
 Emit the acli command tree for agent discovery

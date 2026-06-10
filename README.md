@@ -250,30 +250,39 @@ refused. On the accepted path the box runs at `meet(consumer, requires)`
 — least authority, bounded below the consumer's grant, with egress
 restricted to exactly the hosts the artifact named.
 
+Install runs four gates, each a hard refusal: **authenticity** (the
+signature verifies), **authorization** (the signer is in your trusted-keys
+keyring — `--trusted-keys`), **integrity** (the archive's SHA-256 matches
+the signed `content_hash` — `--artifact`), and **capability** (the
+narrowing wall above). Skip the keyring or the bytes and it still installs,
+but says so loudly — the bytes are then a promise you never checked.
+
 ```sh
 cargo run -p lex-os -- capsule keygen --seed <hex32>     # an Ed25519 publisher key
 cargo run -p lex-os -- capsule sign \
-  --artifact lex-weather@1.2.0 --content-hash <sha256> \
+  --artifact lex-weather@1.2.0 --artifact-file lex-weather-1.2.0.tar \
   --requires examples/capsule-requires.json --key <secret> --out contract.json
 cargo run -p lex-os -- capsule verify --contract contract.json  # check the signature
 cargo run -p lex-os -- capsule install \
-  --consumer examples/capsule-consumer.json --contract contract.json
-#   installs at the artifact's least authority, OR refuses (exit 8) when it
-#   asks for more than the consumer grants — e.g. exec it was never given
+  --consumer examples/capsule-consumer.json --contract contract.json \
+  --artifact lex-weather-1.2.0.tar --trusted-keys keyring.json
+#   installs at the artifact's least authority, OR refuses (exit 8) on an
+#   untrusted signer, a substituted archive, or a grant it was never given
 ```
 
 `bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
-package's required grant, a consumer installs it at least authority, and a
-compromised update, a tampered contract, and an unsatisfiable host are each
-refused. No KVM, root, or network needed; it runs against the simulated
-perimeter.
+package's required grant, a consumer installs it (publisher pinned, bytes
+verified) at least authority, and five refusals fire: a compromised update,
+a tampered contract, an unsatisfiable host, a substituted archive, and an
+untrusted publisher. No KVM, root, or network needed; it runs against the
+simulated perimeter.
 
 `install` resolves the effective box and provisions it under the same
 *simulated* perimeter as `run`, so it is **not** a security boundary and
-says so (`security_boundary: false`). This is a first cut (lex-os#34): the
-signed grant and the refuse-don't-downgrade install hold end-to-end;
-binding the contract to real package bytes and a signer-trust policy are
-the open parts.
+says so (`security_boundary: false`). Still open (lex-os#34): fetching the
+artifact from a registry rather than a local file, earning signer trust
+from a publisher's track record (lex-lang's `ProducerTrust`) rather than a
+pinned keyring, and recording installs in the attestation graph.
 
 ## The reversibility classification
 
