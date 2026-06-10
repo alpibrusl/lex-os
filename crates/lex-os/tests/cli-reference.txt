@@ -265,6 +265,7 @@ Options:
       --contract <CONTRACT>          The signed capability contract travelling with the artifact
       --artifact <ARTIFACT>          The artifact archive; its SHA-256 must match the contract's content hash, or install is refused. Omit to skip the byte check (a loud warning is printed)
       --trusted-keys <TRUSTED_KEYS>  A trusted-keys JSON keyring (`{"trusted":["<hex>",…]}`); the signer must be in it. Omit to accept any valid signature (trust-on-first-use, warned)
+      --audit-out <AUDIT_OUT>        Write a tamper-evident audit log of the install decision (request → installed/refused) here. Verify it with `lex-os audit verify`
       --namespaces-only              Pretend the host can only do namespace isolation
       --offline                      Pretend the host has no outbound network
   -h, --help                         Print help
