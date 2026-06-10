@@ -254,13 +254,19 @@ restricted to exactly the hosts the artifact named.
 cargo run -p lex-os -- capsule keygen --seed <hex32>     # an Ed25519 publisher key
 cargo run -p lex-os -- capsule sign \
   --artifact lex-weather@1.2.0 --content-hash <sha256> \
-  --requires requires.json --key <secret> --out contract.json   # bind the grant + sign
+  --requires examples/capsule-requires.json --key <secret> --out contract.json
 cargo run -p lex-os -- capsule verify --contract contract.json  # check the signature
 cargo run -p lex-os -- capsule install \
-  --consumer consumer.json --contract contract.json
+  --consumer examples/capsule-consumer.json --contract contract.json
 #   installs at the artifact's least authority, OR refuses (exit 8) when it
 #   asks for more than the consumer grants — e.g. exec it was never given
 ```
+
+`bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
+package's required grant, a consumer installs it at least authority, and a
+compromised update, a tampered contract, and an unsatisfiable host are each
+refused. No KVM, root, or network needed; it runs against the simulated
+perimeter.
 
 `install` resolves the effective box and provisions it under the same
 *simulated* perimeter as `run`, so it is **not** a security boundary and
