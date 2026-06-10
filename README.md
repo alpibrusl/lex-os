@@ -257,6 +257,11 @@ the signed `content_hash` — `--artifact`), and **capability** (the
 narrowing wall above). Skip the keyring or the bytes and it still installs,
 but says so loudly — the bytes are then a promise you never checked.
 
+The trusted-keys keyring needn't be hand-pinned: `lex producer-trust keyring
+--min-trust N` (lex-lang) exports a keyring of publishers whose **earned**
+ProducerTrust score clears a threshold, in exactly this `--trusted-keys`
+format — so a signer is authorized by track record, not a static allowlist.
+
 ```sh
 cargo run -p lex-os -- capsule keygen --seed <hex32>     # an Ed25519 publisher key
 cargo run -p lex-os -- capsule sign \
@@ -307,10 +312,10 @@ as `run`, so it is **not** a security boundary and says so
 the entrypoint's Lex in-box (lex-runtime) or running it on a real
 rootfs+exec under Firecracker — `--run` today mediates the capabilities the
 type-checked entrypoint *declares*; fetching the artifact from a registry
-rather than a local file; earning signer trust from a publisher's track
-record (lex-lang's `ProducerTrust`) rather than a pinned keyring; and
-promoting the audit record into a publish-time attestation queryable via
-`lex blame`.
+rather than a local file; and promoting the audit record into a publish-time
+attestation queryable via `lex blame`. (Earning signer trust from a
+publisher's track record rather than a pinned keyring is now available via
+`lex producer-trust keyring` — see above.)
 
 ## The reversibility classification
 
