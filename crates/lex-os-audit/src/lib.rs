@@ -56,13 +56,23 @@ pub enum Event {
     NarrowingBlocked { reason: String },
     /// A capsule install was requested — logged *before* any gate decides,
     /// like [`Event::CommandRequested`]. `signer` is the claimed (not yet
-    /// verified) publisher key.
-    CapsuleRequested { artifact: String, signer: String },
+    /// verified) publisher key; `content_hash` is the archive hash the
+    /// contract claims (not yet checked against the bytes).
+    CapsuleRequested {
+        artifact: String,
+        signer: String,
+        content_hash: String,
+    },
     /// A capsule passed every gate (authenticity, trusted signer, byte
     /// integrity, narrowing) and the effective box was provisioned.
+    /// `content_hash` names the exact published bytes that installed —
+    /// the publish-time identity, so the record says *which* artifact ran,
+    /// not just its mutable `name@version` label. Promoted into the
+    /// lex-lang attestation graph by `lex attest import-install`.
     CapsuleInstalled {
         artifact: String,
         signer: String,
+        content_hash: String,
         effective_grant: String,
     },
     /// A capsule install was refused, with the reason (an untrusted signer,
@@ -288,10 +298,12 @@ mod tests {
         log.append(Event::CapsuleRequested {
             artifact: "pdf-extract@2.0.0".into(),
             signer: "f9b43983".into(),
+            content_hash: "deadbeef".into(),
         });
         log.append(Event::CapsuleInstalled {
             artifact: "pdf-extract@2.0.0".into(),
             signer: "f9b43983".into(),
+            content_hash: "deadbeef".into(),
             effective_grant: "fs=read-only net=allowlist exec=none".into(),
         });
         assert!(log.verify().is_ok());
