@@ -925,6 +925,8 @@ version = "0.1.0"
 dependencies = [
  "acli",
  "anyhow",
+ "arrow-array",
+ "arrow-schema",
  "clap",
  "flate2",
  "hex",
