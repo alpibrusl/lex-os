@@ -46,5 +46,10 @@ flate2 = "1"
 # in-box execution; matched to lex-bytecode's IndexMap so `Value::record_dynamic`
 # accepts it.
 indexmap = "2"
+# Build the empty `Value::ArrowTable` stub `arrow.read_csv`/`read_parquet`
+# return in-box. Pinned to lex-bytecode's arrow version so the RecordBatch type
+# unifies (already in the build tree via lex-bytecode).
+arrow-array = "58"
+arrow-schema = "58"
 tar = "0.4"
 ureq = { version = "2", features = ["json"] }

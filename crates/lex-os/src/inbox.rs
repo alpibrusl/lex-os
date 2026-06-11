@@ -157,6 +157,19 @@ fn ok_stat() -> Value {
     }
 }
 
+/// `Result[Table, Str]::Ok(<empty table>)` — the shape `arrow.read_csv` /
+/// `read_parquet` return. The simulated box reads nothing, so the stub is an
+/// empty, schema-less Arrow `RecordBatch` (downstream column ops on it surface
+/// as the program's own `Err`, not a host effect).
+fn ok_table() -> Value {
+    let schema = std::sync::Arc::new(arrow_schema::Schema::empty());
+    let batch = arrow_array::RecordBatch::new_empty(schema);
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::ArrowTable(std::sync::Arc::new(batch))],
+    }
+}
+
 /// Map a bytecode effect `(kind, op)` to how it is mediated. Curated to the
 /// effects whose result shapes are wired up and whose grant dimension is known;
 /// every other effect is refused until it is added, so the box never performs an
@@ -170,8 +183,9 @@ fn ok_stat() -> Value {
 /// the language models them as `[io]`, so a capsule that type-checked with an
 /// io-only grant must see them allowed here, in-process.
 ///
-/// `arrow.read_csv`/`tls.from_pem_files` also carry `[fs_read]` but return rich
-/// values (a `Table`, an opaque `TlsConfig`); they are a follow-up.
+/// `arrow.read_csv`/`read_parquet` carry `[fs_read]` and return a `Table` — the
+/// simulated box returns an empty one. `tls.from_pem_files` also carries
+/// `[fs_read]` but returns an opaque `TlsConfig` handle and is a follow-up.
 fn classify(kind: &str, op: &str) -> InBox {
     match (kind, op) {
         // Network egress → the Network-dimension command.
@@ -201,6 +215,16 @@ fn classify(kind: &str, op: &str) -> InBox {
         },
         // Filesystem mutations ([fs_write]) → fs.write (read-write).
         ("fs", "mkdir_p" | "remove" | "copy") => InBox::Mediated {
+            command: "fs.write",
+            stub: ok_unit(),
+        },
+        // Arrow dataframe I/O ([fs_read]/[fs_write]) → the same fs commands,
+        // returning a (empty) Table on read and Ok(()) on write.
+        ("arrow", "read_csv" | "read_parquet" | "read_parquet_cols") => InBox::Mediated {
+            command: "fs.read",
+            stub: ok_table(),
+        },
+        ("arrow", "write_parquet" | "write_csv") => InBox::Mediated {
             command: "fs.write",
             stub: ok_unit(),
         },
@@ -313,6 +337,24 @@ mod tests {
     fn fs_is_sealed_when_the_grant_has_no_filesystem() {
         let (mut h, _s) = handler(Grant::new(Level::None, Level::Full, Level::Full));
         assert!(h.dispatch("fs", "exists", vec![]).unwrap_err().contains("sealed at the edge"));
+    }
+
+    #[test]
+    fn arrow_io_is_filesystem_gated_and_reads_return_a_table() {
+        // read_csv reads the filesystem → allowed at read-only, returns a Table.
+        let (mut h, _s) = handler(Grant::new(Level::ReadOnly, Level::None, Level::None));
+        match h.dispatch("arrow", "read_csv", vec![]).unwrap() {
+            Value::Variant { name, args } => {
+                assert_eq!(name, "Ok");
+                assert!(matches!(args.first(), Some(Value::ArrowTable(_))));
+            }
+            other => panic!("expected Ok(Table), got {other:?}"),
+        }
+        // write needs read-write; a read-only grant seals it at the edge.
+        assert!(h
+            .dispatch("arrow", "write_csv", vec![])
+            .unwrap_err()
+            .contains("sealed at the edge"));
     }
 
     #[test]
