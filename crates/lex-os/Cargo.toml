@@ -42,5 +42,9 @@ hex.workspace = true
 # Read the package's entrypoint out of a `lex pkg` archive (gzipped tar) so
 # `capsule install --run` runs the artifact's real code, not a stand-in.
 flate2 = "1"
+# Build the record stub `proc.spawn` returns ({stdout, stderr, exit_code}) for
+# in-box execution; matched to lex-bytecode's IndexMap so `Value::record_dynamic`
+# accepts it.
+indexmap = "2"
 tar = "0.4"
 ureq = { version = "2", features = ["json"] }

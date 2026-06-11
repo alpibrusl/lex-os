@@ -928,6 +928,7 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "indexmap",
  "lex-ast",
  "lex-bytecode",
  "lex-os-audit",
