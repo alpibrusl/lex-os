@@ -134,6 +134,29 @@ fn proc_ok() -> Value {
     }
 }
 
+/// `Result[List[Str], Str]::Ok([])` — the shape `fs.list_dir`/`walk`/`glob`
+/// return (an empty listing in the simulated box).
+fn ok_list() -> Value {
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::List(Default::default())],
+    }
+}
+
+/// `Result[{size, mtime, is_dir, is_file}, Str]::Ok(record)` — the shape
+/// `fs.stat` returns.
+fn ok_stat() -> Value {
+    let mut record = indexmap::IndexMap::new();
+    record.insert("size".to_string(), Value::Int(0));
+    record.insert("mtime".to_string(), Value::Int(0));
+    record.insert("is_dir".to_string(), Value::Bool(false));
+    record.insert("is_file".to_string(), Value::Bool(false));
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::record_dynamic(record)],
+    }
+}
+
 /// Map a bytecode effect `(kind, op)` to how it is mediated. Curated to the
 /// effects whose result shapes are wired up and whose grant dimension is known;
 /// every other effect is refused until it is added, so the box never performs an
@@ -141,11 +164,14 @@ fn proc_ok() -> Value {
 ///
 /// Dimension mapping follows the static effect model exactly (so the runtime
 /// gate can't contradict the type-check wall): `net` → Network, `proc` → Exec,
-/// and the `io` family carries the ungated `[io]` effect — `io.read`/`io.write`
-/// do touch files, but the language models them as `[io]`, so a capsule that
-/// type-checked with an io-only grant must see them allowed here, in-process.
-/// The Filesystem dimension proper (`[fs_read]`/`[fs_write]`, e.g.
-/// `arrow.read_csv`) returns rich values (a `Table`) and is a follow-up.
+/// the `fs` module → Filesystem (read-family `[fs_walk]`/`[fs_read]` at
+/// read-only, mutations `[fs_write]` at read-write), and the `io` family
+/// carries the ungated `[io]` effect — `io.read`/`io.write` do touch files, but
+/// the language models them as `[io]`, so a capsule that type-checked with an
+/// io-only grant must see them allowed here, in-process.
+///
+/// `arrow.read_csv`/`tls.from_pem_files` also carry `[fs_read]` but return rich
+/// values (a `Table`, an opaque `TlsConfig`); they are a follow-up.
 fn classify(kind: &str, op: &str) -> InBox {
     match (kind, op) {
         // Network egress → the Network-dimension command.
@@ -157,6 +183,26 @@ fn classify(kind: &str, op: &str) -> InBox {
         ("proc", _) => InBox::Mediated {
             command: "exec.shell",
             stub: proc_ok(),
+        },
+        // Filesystem reads / traversal ([fs_read] / [fs_walk]) → fs.read
+        // (read-only). Return shapes match each builtin: a bare `Bool`, or a
+        // `Result` over a list / stat record.
+        ("fs", "exists" | "is_file" | "is_dir") => InBox::Mediated {
+            command: "fs.read",
+            stub: Value::Bool(false),
+        },
+        ("fs", "list_dir" | "walk" | "glob") => InBox::Mediated {
+            command: "fs.read",
+            stub: ok_list(),
+        },
+        ("fs", "stat") => InBox::Mediated {
+            command: "fs.read",
+            stub: ok_stat(),
+        },
+        // Filesystem mutations ([fs_write]) → fs.write (read-write).
+        ("fs", "mkdir_p" | "remove" | "copy") => InBox::Mediated {
+            command: "fs.write",
+            stub: ok_unit(),
         },
         // The `io` family carries `[io]` — ungated by the grant, so allowed
         // in-process with a shape-correct stub (no OS effect in the sim box).
@@ -243,6 +289,30 @@ mod tests {
         let (mut h, _s) = handler(Grant::new(Level::Full, Level::Full, Level::None));
         let err = h.dispatch("proc", "spawn", vec![]).unwrap_err();
         assert!(err.contains("sealed at the edge"), "got: {err}");
+    }
+
+    #[test]
+    fn fs_reads_are_gated_at_read_only_and_writes_at_read_write() {
+        // Read-only grant: traversal reads pass, mutations are sealed.
+        let (mut h, state) = handler(Grant::new(Level::ReadOnly, Level::None, Level::None));
+        assert!(matches!(h.dispatch("fs", "exists", vec![]).unwrap(), Value::Bool(_)));
+        assert!(matches!(h.dispatch("fs", "list_dir", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "Ok"));
+        assert!(state.borrow().audit.to_ndjson().unwrap().contains("fs.read"));
+        // mkdir needs read-write; a read-only grant seals it at the edge.
+        let err = h.dispatch("fs", "mkdir_p", vec![]).unwrap_err();
+        assert!(err.contains("sealed at the edge"), "got: {err}");
+
+        // Read-write grant: mutations pass too.
+        let (mut h, _s) = handler(Grant::new(Level::ReadWrite, Level::None, Level::None));
+        assert!(matches!(h.dispatch("fs", "mkdir_p", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "Ok"));
+    }
+
+    #[test]
+    fn fs_is_sealed_when_the_grant_has_no_filesystem() {
+        let (mut h, _s) = handler(Grant::new(Level::None, Level::Full, Level::Full));
+        assert!(h.dispatch("fs", "exists", vec![]).unwrap_err().contains("sealed at the edge"));
     }
 
     #[test]
