@@ -97,7 +97,7 @@ enum InBox {
     Unsupported,
 }
 
-/// `Result[Str, Str]::Ok("[mediated]")` — the shape `net.get`/`net.post` return.
+/// `Result[Str, Str]::Ok("[mediated]")` — the shape `net.get`/`io.read` return.
 fn ok_str() -> Value {
     Value::Variant {
         name: "Ok".into(),
@@ -105,19 +105,112 @@ fn ok_str() -> Value {
     }
 }
 
-/// Map a bytecode effect `(kind, op)` to how it is mediated. Curated for the
-/// first slice: network egress (the Network-dimension command) and stdout;
-/// every other effect is refused until its result shape is wired up, so the
-/// box never performs an effect lex-os can't yet gate.
+/// `Result[Unit, Str]::Ok(())` — the shape `io.write` returns.
+fn ok_unit() -> Value {
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::Unit],
+    }
+}
+
+/// `Option[Str]::None` — the shape `io.readline` returns at EOF.
+fn none_value() -> Value {
+    Value::Variant {
+        name: "None".into(),
+        args: vec![],
+    }
+}
+
+/// `Result[{stdout, stderr, exit_code}, Str]::Ok(record)` — the shape
+/// `proc.spawn` returns: an empty, exit-0 result for the simulated box.
+fn proc_ok() -> Value {
+    let mut record = indexmap::IndexMap::new();
+    record.insert("stdout".to_string(), Value::Str("".into()));
+    record.insert("stderr".to_string(), Value::Str("".into()));
+    record.insert("exit_code".to_string(), Value::Int(0));
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::record_dynamic(record)],
+    }
+}
+
+/// `Result[List[Str], Str]::Ok([])` — the shape `fs.list_dir`/`walk`/`glob`
+/// return (an empty listing in the simulated box).
+fn ok_list() -> Value {
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::List(Default::default())],
+    }
+}
+
+/// `Result[{size, mtime, is_dir, is_file}, Str]::Ok(record)` — the shape
+/// `fs.stat` returns.
+fn ok_stat() -> Value {
+    let mut record = indexmap::IndexMap::new();
+    record.insert("size".to_string(), Value::Int(0));
+    record.insert("mtime".to_string(), Value::Int(0));
+    record.insert("is_dir".to_string(), Value::Bool(false));
+    record.insert("is_file".to_string(), Value::Bool(false));
+    Value::Variant {
+        name: "Ok".into(),
+        args: vec![Value::record_dynamic(record)],
+    }
+}
+
+/// Map a bytecode effect `(kind, op)` to how it is mediated. Curated to the
+/// effects whose result shapes are wired up and whose grant dimension is known;
+/// every other effect is refused until it is added, so the box never performs an
+/// effect lex-os can't yet gate.
+///
+/// Dimension mapping follows the static effect model exactly (so the runtime
+/// gate can't contradict the type-check wall): `net` → Network, `proc` → Exec,
+/// the `fs` module → Filesystem (read-family `[fs_walk]`/`[fs_read]` at
+/// read-only, mutations `[fs_write]` at read-write), and the `io` family
+/// carries the ungated `[io]` effect — `io.read`/`io.write` do touch files, but
+/// the language models them as `[io]`, so a capsule that type-checked with an
+/// io-only grant must see them allowed here, in-process.
+///
+/// `arrow.read_csv`/`tls.from_pem_files` also carry `[fs_read]` but return rich
+/// values (a `Table`, an opaque `TlsConfig`); they are a follow-up.
 fn classify(kind: &str, op: &str) -> InBox {
     match (kind, op) {
+        // Network egress → the Network-dimension command.
         ("net", _) => InBox::Mediated {
             command: "net.fetch",
             stub: ok_str(),
         },
-        // Stdout has no OS boundary — `commands_for_effects` mapped `io` to
-        // nothing for the same reason.
+        // Subprocess execution → the Exec-dimension command.
+        ("proc", _) => InBox::Mediated {
+            command: "exec.shell",
+            stub: proc_ok(),
+        },
+        // Filesystem reads / traversal ([fs_read] / [fs_walk]) → fs.read
+        // (read-only). Return shapes match each builtin: a bare `Bool`, or a
+        // `Result` over a list / stat record.
+        ("fs", "exists" | "is_file" | "is_dir") => InBox::Mediated {
+            command: "fs.read",
+            stub: Value::Bool(false),
+        },
+        ("fs", "list_dir" | "walk" | "glob") => InBox::Mediated {
+            command: "fs.read",
+            stub: ok_list(),
+        },
+        ("fs", "stat") => InBox::Mediated {
+            command: "fs.read",
+            stub: ok_stat(),
+        },
+        // Filesystem mutations ([fs_write]) → fs.write (read-write).
+        ("fs", "mkdir_p" | "remove" | "copy") => InBox::Mediated {
+            command: "fs.write",
+            stub: ok_unit(),
+        },
+        // The `io` family carries `[io]` — ungated by the grant, so allowed
+        // in-process with a shape-correct stub (no OS effect in the sim box).
         ("io", "print") => InBox::InProcess(Value::Unit),
+        ("io", "read") => InBox::InProcess(ok_str()),
+        ("io", "write") => InBox::InProcess(ok_unit()),
+        ("io", "readline") => InBox::InProcess(none_value()),
+        ("io", "argv") => InBox::InProcess(Value::List(Default::default())),
         _ => InBox::Unsupported,
     }
 }
@@ -177,5 +270,64 @@ mod tests {
         // the box never performs an effect outside the mediated set.
         let (mut h, _s) = handler(Grant::new(Level::Full, Level::Full, Level::Full));
         assert!(h.dispatch("sql", "query", vec![]).is_err());
+    }
+
+    #[test]
+    fn proc_is_gated_on_the_exec_dimension() {
+        // Allowed when exec is granted: returns Result::Ok(record).
+        let (mut h, state) = handler(Grant::new(Level::None, Level::None, Level::Sandboxed));
+        let v = h.dispatch("proc", "spawn", vec![]).unwrap();
+        assert!(matches!(v, Value::Variant { ref name, .. } if name == "Ok"));
+        assert!(state
+            .borrow()
+            .audit
+            .to_ndjson()
+            .unwrap()
+            .contains("exec.shell"));
+
+        // Sealed at the edge when exec is not granted.
+        let (mut h, _s) = handler(Grant::new(Level::Full, Level::Full, Level::None));
+        let err = h.dispatch("proc", "spawn", vec![]).unwrap_err();
+        assert!(err.contains("sealed at the edge"), "got: {err}");
+    }
+
+    #[test]
+    fn fs_reads_are_gated_at_read_only_and_writes_at_read_write() {
+        // Read-only grant: traversal reads pass, mutations are sealed.
+        let (mut h, state) = handler(Grant::new(Level::ReadOnly, Level::None, Level::None));
+        assert!(matches!(h.dispatch("fs", "exists", vec![]).unwrap(), Value::Bool(_)));
+        assert!(matches!(h.dispatch("fs", "list_dir", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "Ok"));
+        assert!(state.borrow().audit.to_ndjson().unwrap().contains("fs.read"));
+        // mkdir needs read-write; a read-only grant seals it at the edge.
+        let err = h.dispatch("fs", "mkdir_p", vec![]).unwrap_err();
+        assert!(err.contains("sealed at the edge"), "got: {err}");
+
+        // Read-write grant: mutations pass too.
+        let (mut h, _s) = handler(Grant::new(Level::ReadWrite, Level::None, Level::None));
+        assert!(matches!(h.dispatch("fs", "mkdir_p", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "Ok"));
+    }
+
+    #[test]
+    fn fs_is_sealed_when_the_grant_has_no_filesystem() {
+        let (mut h, _s) = handler(Grant::new(Level::None, Level::Full, Level::Full));
+        assert!(h.dispatch("fs", "exists", vec![]).unwrap_err().contains("sealed at the edge"));
+    }
+
+    #[test]
+    fn the_io_family_runs_in_process_with_shape_correct_stubs() {
+        // `[io]` is ungated, so these are allowed under any grant — and the
+        // stub shape matches each builtin's return type.
+        let (mut h, _s) = handler(Grant::new(Level::None, Level::None, Level::None));
+        assert!(matches!(h.dispatch("io", "read", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "Ok"));
+        assert!(matches!(h.dispatch("io", "write", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "Ok"));
+        assert!(matches!(h.dispatch("io", "readline", vec![]).unwrap(),
+            Value::Variant { ref name, .. } if name == "None"));
+        assert!(matches!(h.dispatch("io", "argv", vec![]).unwrap(), Value::List(_)));
+        // None of the ungated io effects logged a mediated command.
+        // (only the performed list grows)
     }
 }
