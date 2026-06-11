@@ -303,12 +303,16 @@ With `--run`, install runs the package's **real entrypoint** under the
 effective manifest: it extracts `src/main.lex` from the verified archive,
 **type-checks it against the effective grant** (the type-check wall, now on
 the distributed package's own code — an entrypoint that over-reaches is
-refused *before* it runs), then drives the supervisor loop from its declared
-effects. The install decision and the session it authorized form **one
-unbroken audit chain** (`capsule_installed → provisioned → … →
-session_ended`). lex-os mediates the capabilities the entrypoint declared;
-actually *interpreting* the Lex in-box (lex-runtime) or a real rootfs+exec
-under Firecracker is the next step still open below.
+refused *before* it runs), then **interprets it in-box** with the
+lex-bytecode VM and routes **every effect it actually performs** — `net`,
+the `fs` module, `proc`, `arrow` — through the supervisor's mediation gate,
+in execution order. A consequential effect that exceeds the box's authority
+is **sealed at the edge** mid-run and the program sees the refusal — free
+inside the box, sealed at the edge. The install decision and the session it
+authorized form **one unbroken audit chain** (`capsule_installed →
+provisioned → … → session_ended`). **`bash demo/in-box.sh`** shows it: the
+same code runs to completion under one budget and has its net call sealed
+mid-execution under a tighter one.
 
 `bash demo/capsule.sh` runs the whole story end-to-end — a vendor signs a
 package's required grant, a consumer installs it (publisher pinned, bytes
@@ -321,14 +325,17 @@ the simulated perimeter.
 
 `install` provisions the effective box under the same *simulated* perimeter
 as `run`, so it is **not** a security boundary and says so
-(`security_boundary: false`). Still open (lex-os#36): actually interpreting
-the entrypoint's Lex in-box (lex-runtime) or running it on a real
-rootfs+exec under Firecracker — `--run` today mediates the capabilities the
-type-checked entrypoint *declares*; and fetching the artifact from a registry
-rather than a local file. (Two follow-ups are now delivered: earning signer
-trust from a publisher's track record via `lex producer-trust keyring`, and
-promoting the install record into a publish-time attestation queryable via
-`lex blame` / `lex attest filter` — both described above.)
+(`security_boundary: false`). Still open (lex-os#36): running the
+*interpreted* entrypoint on a **real rootfs+exec under Firecracker**, so the
+perimeter is a kernel boundary rather than the simulated one, and widening
+the mediated effect surface past the common stdlib (`tls.from_pem_files` is
+the last `[fs_read]` gap). The rest of #36 is now delivered, all described
+above: **interpreting the entrypoint in-box** and mediating every effect it
+performs (`--run`); **fetching from a registry and verifying the signed
+contract** before install (`lex pkg install --trusted-keys`, in lex-lang);
+earning signer trust from track record (`lex producer-trust keyring`); and
+promoting the install into a queryable attestation (`lex attest
+import-install`).
 
 ## The reversibility classification
 
