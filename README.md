@@ -1,5 +1,9 @@
 # lex-os
 
+[![CI](https://github.com/alpibrusl/lex-os/actions/workflows/ci.yml/badge.svg)](https://github.com/alpibrusl/lex-os/actions/workflows/ci.yml)
+
+**Part of the [Lex](https://lexlang.org) project** — Substrate · [Manifesto](https://lexlang.org/manifesto) · [All packages](https://lexlang.org)
+
 > An execution environment where the "users" are agents, not humans. An
 > agent is handed a sealed, disposable box plus a goal, and operates it
 > without human intervention until the goal is met, the budget is
