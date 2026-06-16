@@ -33,9 +33,9 @@ pub struct ActuatorGripper {
     pub max_grip_force_n: f64,
 }
 
-/// The actuation grant: allowed skills + per-actuator caps. Reversibility
-/// per skill is carried as `(skill, class)` pairs so the supervisor can
-/// reuse the existing `Reversibility` gate.
+/// The actuation grant: the allowed-skills allowlist + per-actuator caps.
+/// The supervisor's `mediate_skill` reads this to admit or deny each skill
+/// request before the effect runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Actuation {
     pub skills: Vec<String>,
