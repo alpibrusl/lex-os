@@ -14,6 +14,9 @@
 
 pub use lex_types::trust::{Dimension, Grant, GrantId, Level, TrustError};
 
+mod actuation;
+pub use actuation::{Actuation, ActuatorArm, ActuatorGripper, Range};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
