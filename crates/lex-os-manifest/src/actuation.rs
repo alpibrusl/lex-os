@@ -43,6 +43,15 @@ pub struct Actuation {
     pub gripper: ActuatorGripper,
 }
 
+// `Manifest` derives `Eq` (the supervisor's `AgentAction` requires it via
+// `ProposeChild(Box<Manifest>)`). These actuation types hold `f64`, so `Eq`
+// cannot be derived, but a manifest grant never carries NaN, so the marker
+// impls are sound in practice and keep `Manifest: Eq` intact.
+impl Eq for Range {}
+impl Eq for ActuatorArm {}
+impl Eq for ActuatorGripper {}
+impl Eq for Actuation {}
+
 impl Actuation {
     /// Is `skill` named in the grant's allowlist?
     pub fn allows(&self, skill: &str) -> bool {

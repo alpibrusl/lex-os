@@ -147,7 +147,7 @@ impl IsolationFloor {
 /// The complete dispatch: goal + grant + budgets + isolation floor.
 /// Content-addressable so the supervisor can hold it in tamper-proof
 /// external storage and reprovision an identical box from it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub goal: Goal,
     pub grant: Grant,
