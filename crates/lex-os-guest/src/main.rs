@@ -203,7 +203,11 @@ fn sidecar_url() -> String {
 fn robot_action(script: &str, view: &AgentViewMsg) -> AgentActionMsg {
     let done = |c: &str| view.completed.iter().any(|x| x == c);
     if script == "robot-violation" {
-        if !done("move_to") {
+        // Issue exactly ONE out-of-workspace move (on the first step), then
+        // stop. We key off `view.step`, not `completed`, because a *denied*
+        // skill is never added to `completed` — keying off `completed` would
+        // re-propose the rejected move forever until the step ceiling.
+        if view.step == 0 {
             return AgentActionMsg::RunSkill {
                 skill: "move_to".into(),
                 args: serde_json::json!({"x": 0.9, "y": 0.0, "z": 0.2}),
@@ -515,14 +519,21 @@ mod tests {
     }
 
     #[test]
-    fn robot_violation_requests_out_of_workspace_move() {
-        match robot_action("robot-violation", &robot_view(1, &[])) {
+    fn robot_violation_requests_out_of_workspace_move_once_then_done() {
+        // First step: propose the out-of-workspace move.
+        match robot_action("robot-violation", &robot_view(0, &[])) {
             AgentActionMsg::RunSkill { skill, args } => {
                 assert_eq!(skill, "move_to");
                 assert!(args.get("x").unwrap().as_f64().unwrap() > 0.5);
             }
             other => panic!("expected out-of-workspace move, got {other:?}"),
         }
+        // After the (denied) first step, it must terminate rather than loop —
+        // denials never populate `completed`, so it keys off `step`.
+        assert!(matches!(
+            robot_action("robot-violation", &robot_view(1, &[])),
+            AgentActionMsg::Done
+        ));
     }
 
     #[test]
