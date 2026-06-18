@@ -35,6 +35,14 @@ pub enum Event {
     },
     /// The supervisor allowed the command.
     CommandAllowed { command: String },
+    /// The observed result of an approved skill executed in the guest.
+    /// Recorded after the effect so the audit log carries outcomes, not
+    /// just decisions.
+    SkillOutcome {
+        command: String,
+        outcome: String,
+        observation: String,
+    },
     /// The supervisor denied the command, with a reason.
     CommandDenied { command: String, reason: String },
     /// Budget was consumed; the running totals after the charge.
@@ -296,5 +304,18 @@ mod tests {
             let _: serde_json::Value = serde_json::from_str(line).unwrap();
         }
         assert!(nd.contains("narrowing_blocked"));
+    }
+
+    #[test]
+    fn skill_outcome_event_chains_and_verifies() {
+        let mut log = AuditLog::new();
+        log.append(Event::CommandAllowed { command: "move_to".into() });
+        log.append(Event::SkillOutcome {
+            command: "move_to".into(),
+            outcome: "reached".into(),
+            observation: "{\"coverage_reward\":0.9}".into(),
+        });
+        assert!(log.verify().is_ok());
+        assert!(log.to_ndjson().unwrap().contains("skill_outcome"));
     }
 }
