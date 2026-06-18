@@ -24,6 +24,11 @@ pub struct AgentViewMsg {
 pub enum AgentActionMsg {
     /// Request a mediated command by name.
     Run { command: String },
+    /// Request a mediated *robot skill* with structured arguments. The
+    /// supervisor mediates the args against the manifest's actuation block,
+    /// replies with a `SkillDecisionMsg`, and (if allowed) awaits a
+    /// `SkillOutcomeMsg` after the guest executes the effect.
+    RunSkill { skill: String, args: serde_json::Value },
     /// Signal goal complete.
     Done,
     /// Intentionally destroy the box.
@@ -32,6 +37,25 @@ pub enum AgentActionMsg {
     /// decide whether to accept). The supervisor always builds the concrete
     /// child manifest on the host side — the guest only signals intent.
     ProposeChild { reason: String },
+}
+
+/// Host → Guest. The supervisor's decision on a `RunSkill`, sent before any
+/// effect runs. On `allowed: true` the guest executes the skill against the
+/// sidecar and replies with a `SkillOutcomeMsg`; on `false` it loops to the
+/// next view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillDecisionMsg {
+    pub allowed: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Guest → Host. The observed result of executing an approved skill against
+/// the sidecar. `observation` is the raw sidecar JSON (for the audit log).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillOutcomeMsg {
+    pub outcome: String,
+    pub observation: String,
 }
 
 #[cfg(test)]
@@ -78,5 +102,28 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         let back: AgentActionMsg = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, AgentActionMsg::ProposeChild { .. }));
+    }
+
+    #[test]
+    fn run_skill_round_trips() {
+        let a = AgentActionMsg::RunSkill {
+            skill: "move_to".into(),
+            args: serde_json::json!({"x": 0.3, "y": 0.0, "z": 0.2}),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("\"action\":\"run_skill\""));
+        let back: AgentActionMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, AgentActionMsg::RunSkill { skill, .. } if skill == "move_to"));
+    }
+
+    #[test]
+    fn decision_and_outcome_round_trip() {
+        let d = SkillDecisionMsg { allowed: false, reason: Some("out of workspace".into()) };
+        let back: SkillDecisionMsg = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(!back.allowed);
+
+        let o = SkillOutcomeMsg { outcome: "reached".into(), observation: "{\"coverage\":0.9}".into() };
+        let back2: SkillOutcomeMsg = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back2.outcome, "reached");
     }
 }
