@@ -17,6 +17,7 @@ lex-os-perimeter.workspace = true
 lex-os-resolver.workspace = true
 lex-os-audit.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

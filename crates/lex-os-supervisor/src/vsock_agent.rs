@@ -93,6 +93,7 @@ impl<T: Transport> Agent for VsockAgent<T> {
 fn convert(msg: AgentActionMsg, _parent: &Manifest) -> AgentAction {
     match msg {
         AgentActionMsg::Run { command } => AgentAction::Run(command),
+        AgentActionMsg::RunSkill { skill, args } => AgentAction::RunSkill { skill, args },
         AgentActionMsg::Done => AgentAction::Done,
         AgentActionMsg::Destroy { reason } => AgentAction::Destroy(reason),
         AgentActionMsg::ProposeChild { .. } => {
@@ -235,6 +236,15 @@ mod tests {
                 Ok(AgentActionMsg::Run {
                     command: "fs.read".into(),
                 })
+            }
+            fn send_decision(
+                &mut self,
+                _d: &lex_os_proto::msg::SkillDecisionMsg,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn recv_outcome(&mut self) -> anyhow::Result<lex_os_proto::msg::SkillOutcomeMsg> {
+                anyhow::bail!("no outcome")
             }
             fn reconnect(&mut self) -> anyhow::Result<()> {
                 *self.reconnects.lock().unwrap() += 1;

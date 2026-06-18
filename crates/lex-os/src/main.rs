@@ -666,6 +666,15 @@ impl lex_os_proto::transport::Transport for LazyVsockTransport {
     fn recv_action(&mut self) -> anyhow::Result<lex_os_proto::msg::AgentActionMsg> {
         self.ensure()?.recv_action()
     }
+    fn send_decision(
+        &mut self,
+        decision: &lex_os_proto::msg::SkillDecisionMsg,
+    ) -> anyhow::Result<()> {
+        self.ensure()?.send_decision(decision)
+    }
+    fn recv_outcome(&mut self) -> anyhow::Result<lex_os_proto::msg::SkillOutcomeMsg> {
+        self.ensure()?.recv_outcome()
+    }
     fn reconnect(&mut self) -> anyhow::Result<()> {
         // Drop the dead guest's stream AND the old listener. Under the jailer
         // the previous chroot (and its socket) was removed on reprovision, so
