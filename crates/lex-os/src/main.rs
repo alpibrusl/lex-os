@@ -151,6 +151,9 @@ enum AgentBackend {
     /// test without Firecracker; on Linux with --features firecracker the
     /// guest runs inside the microVM over vsock instead.
     Guest,
+    /// In-guest robot agent that issues move_to/grasp/run_policy as
+    /// supervisor-mediated skills against the gym sidecar.
+    Robot,
 }
 
 #[derive(Subcommand)]
@@ -541,6 +544,43 @@ fn cmd_run(
             // Real backend → the guest runs INSIDE the microVM over vsock.
             // Simulated → a host subprocess over stdio (same binary, same
             // protocol). Selected at run time, matching the chosen perimeter.
+            let res = match backend {
+                #[cfg(feature = "firecracker")]
+                Backend::Real => {
+                    let _ = guest_bin; // not used for the in-VM path
+                    run_guest_in_vm(
+                        fmt,
+                        manifest.clone(),
+                        &env,
+                        model,
+                        ollama_url,
+                        guest_script,
+                        jail.to_config(),
+                    )
+                }
+                Backend::Simulated => run_guest_subprocess(
+                    fmt,
+                    manifest.clone(),
+                    &env,
+                    model,
+                    ollama_url,
+                    guest_bin,
+                    guest_script,
+                ),
+                #[cfg(not(feature = "firecracker"))]
+                Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
+            };
+            match res {
+                Ok(r) => r,
+                Err(e) => {
+                    return emit_err(fmt, "run", ExitCode::PreconditionFailed, &e.to_string())
+                }
+            }
+        }
+        AgentBackend::Robot => {
+            // Same dispatch as Guest, but defaults the in-guest script to
+            // "robot-demo" so the robot agent runs without --guest-script.
+            let guest_script = Some(guest_script.clone().unwrap_or_else(|| "robot-demo".into()));
             let res = match backend {
                 #[cfg(feature = "firecracker")]
                 Backend::Real => {
