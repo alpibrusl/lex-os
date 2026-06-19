@@ -179,6 +179,31 @@ pub trait Perimeter {
     fn destroy(&mut self, reason: &str);
 }
 
+/// Forward `Perimeter` through a `Box`, so the binary can pick the backend at
+/// *run time* — `Box<dyn Perimeter>` — while [`crate::Perimeter`]'s consumers
+/// (the supervisor) stay generic. This is what lets `firecracker` be the
+/// default while `--simulated` remains a runtime opt-in.
+impl<P: Perimeter + ?Sized> Perimeter for Box<P> {
+    fn backend_name(&self) -> &'static str {
+        (**self).backend_name()
+    }
+    fn max_floor(&self) -> IsolationFloor {
+        (**self).max_floor()
+    }
+    fn provision(&mut self, policy: SandboxPolicy) -> Result<(), PerimeterError> {
+        (**self).provision(policy)
+    }
+    fn is_alive(&self) -> bool {
+        (**self).is_alive()
+    }
+    fn check(&self, dim: Dimension, required: Level) -> Result<(), PerimeterError> {
+        (**self).check(dim, required)
+    }
+    fn destroy(&mut self, reason: &str) {
+        (**self).destroy(reason)
+    }
+}
+
 /// An in-process perimeter that enforces the derived [`SandboxPolicy`]
 /// without a real kernel boundary. It is *not* a security boundary — it
 /// exists so the mediation loop, budgets, audit log and reprovision loop

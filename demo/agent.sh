@@ -40,8 +40,8 @@ LEXOS="$REPO_ROOT/target/debug/lex-os"
 echo "+ host check"
 bash demo/host-check.sh || { echo "agent: host-check failed (need KVM + root + assets)" >&2; exit 1; }
 
-echo "+ build lex-os (--features firecracker)"
-"${CARGO[@]}" build --quiet --features firecracker -p lex-os
+echo "+ build lex-os (firecracker is the default feature)"
+"${CARGO[@]}" build --quiet -p lex-os
 [ -x "$LEXOS" ] || { echo "agent: no lex-os binary" >&2; exit 1; }
 
 echo "+ build + inject the in-VM agent binary into the rootfs"

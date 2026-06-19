@@ -100,16 +100,17 @@ derived sandbox lives in `lex-lang`'s `lex-types` crate
 
 ## Try it
 
-The demo runs in-process against the *simulated* perimeter, so it works
-anywhere `cargo` does — no KVM, no root, no network:
+The real microVM perimeter is the default; off a KVM host, add `--simulated`
+to run the demo in-process anywhere `cargo` does — no KVM, no root, no network
+(it is **not** a security boundary, and every run says so):
 
 ```sh
-cargo run -p lex-os -- run                       # run the built-in demo
-cargo run -p lex-os -- --output json run         # agent-friendly output
+cargo run -p lex-os -- run --simulated           # run the built-in demo
+cargo run -p lex-os -- --output json run --simulated  # agent-friendly output
 cargo run -p lex-os -- resolve                   # what does the manifest resolve to?
 cargo run -p lex-os -- manifest sample > m.json  # emit a sample manifest
 cargo run -p lex-os -- manifest hash --manifest m.json   # its content-address
-cargo run -p lex-os -- run --manifest m.json --audit-out audit.json
+cargo run -p lex-os -- run --simulated --manifest m.json --audit-out audit.json
 cargo run -p lex-os -- audit verify --log audit.json     # check the hash chain
 cargo run -p lex-os -- audit render --log audit.json     # NDJSON view
 cargo run -p lex-os -- introspect                # acli command tree
@@ -148,23 +149,26 @@ order is load-bearing: log → reversibility → perimeter → budget → charge
 ### Driving a real LLM (simulated perimeter)
 
 The agent brain is pluggable. Beyond the scripted `demo` agent, `run`
-takes `--agent {ollama,anthropic,openai,guest}`:
+takes `--agent {ollama,anthropic,openai,guest}`. Off a KVM host, pass
+`--simulated` (the real microVM perimeter is the default and would otherwise
+refuse — see below):
 
 ```sh
-cargo run -p lex-os -- run --agent ollama --model mistral
-cargo run -p lex-os -- run --agent anthropic --model claude-...   # ANTHROPIC_API_KEY
-cargo run -p lex-os -- run --agent guest                          # spawn lex-os-guest over stdio
+cargo run -p lex-os -- run --simulated --agent ollama --model mistral
+cargo run -p lex-os -- run --simulated --agent anthropic --model claude-...  # ANTHROPIC_API_KEY
+cargo run -p lex-os -- run --simulated --agent guest                         # spawn lex-os-guest over stdio
 ```
 
 ### On a real microVM (KVM host + root)
 
-The commands above use the in-process *simulated* perimeter, which runs
-anywhere but is **not** a security boundary. On a Linux host with
-`/dev/kvm`, build with `--features firecracker` and the same loop runs
-behind a real Firecracker microVM with a host-side egress wall:
+The **real Firecracker microVM perimeter is the default.** On a Linux host with
+`/dev/kvm`, `run` uses a real, jailed box behind a host-side egress wall. Off a
+KVM host it **refuses rather than silently downgrading** — use `--simulated`
+(the in-process perimeter above, which is *not* a security boundary), or build
+`--no-default-features` for a portable simulator-only binary.
 
 ```sh
-sudo bash demo/setup-assets.sh    # fetch firecracker + kernel + rootfs (one-time)
+sudo bash demo/setup-assets.sh    # fetch firecracker + jailer + kernel + rootfs (one-time)
 sudo bash demo/run.sh             # supervisor lifecycle: provision → destroy → reprovision
 sudo bash demo/wall2.sh           # kernel egress wall: curl 8.8.8.8 blocked from inside the box
 sudo bash demo/agent.sh           # a real LLM agent running INSIDE the microVM (local Ollama)
@@ -173,9 +177,10 @@ sudo bash demo/reprovision.sh     # in-VM agent disposes its box mid-task; super
 sudo bash demo/egress.sh          # egress allowed leg + host-local fence: box reaches ONLY the one allowlisted target
 ```
 
-`cargo run -p lex-os --features firecracker -- box-smoke` is the
-standalone Wall-2 proof: it boots a microVM with the egress wall, streams
-the guest console while it runs its egress probes, then tears it down.
+`cargo run -p lex-os -- box-smoke` is the standalone Wall-2 proof: it boots a
+microVM with the egress wall, streams the guest console while it runs its egress
+probes, then tears it down. (CI exercises the real perimeter on a self-hosted
+KVM runner — see `docs/self-hosted-kvm-runner.md`.)
 
 ## What the demo proves today
 

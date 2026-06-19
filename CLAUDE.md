@@ -40,8 +40,13 @@ cargo build
 cargo test                 # all crates have unit tests; keep them green
 cargo clippy --all-targets # must be warning-clean
 cargo fmt --check
-cargo run -p lex-os -- run # the end-to-end demo should reach GoalMet
+cargo run -p lex-os -- run --simulated # end-to-end demo on the simulator → GoalMet
 ```
+
+The real Firecracker microVM perimeter is the **default** feature. Off a KVM
+host, `run` refuses rather than silently downgrading — pass `--simulated` (used
+above) for the in-process simulator, which is **not** a security boundary. On a
+KVM host, plain `run` uses a real, jailed box.
 
 For the Lex package under `manifests/`:
 

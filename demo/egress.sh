@@ -37,8 +37,8 @@ STUB="$REPO_ROOT/target/debug/results-stub"
 echo "+ host check"
 bash demo/host-check.sh || { echo "egress: host-check failed (need KVM + root + assets)" >&2; exit 1; }
 
-echo "+ build lex-os + results-stub (--features firecracker)"
-"${CARGO[@]}" build --quiet --features firecracker -p lex-os -p results-stub
+echo "+ build lex-os + results-stub (firecracker is the default feature)"
+"${CARGO[@]}" build --quiet -p lex-os -p results-stub
 [ -x "$LEXOS" ] && [ -x "$STUB" ] || { echo "egress: missing binaries" >&2; exit 1; }
 
 echo "+ inject the guest init/probe into the rootfs"

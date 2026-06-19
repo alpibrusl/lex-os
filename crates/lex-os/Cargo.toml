@@ -16,8 +16,11 @@ name = "lex-os"
 path = "src/main.rs"
 
 [features]
-# Select the real Firecracker microVM perimeter for `run` instead of the
-# in-process simulated one. Requires a KVM host (see demo/host-check.sh).
+# The real Firecracker microVM perimeter is the DEFAULT: on a KVM host `run`
+# uses a real, jailed box, and the simulated perimeter is an explicit
+# `--simulated` opt-in. Build `--no-default-features` for a portable, simulator-
+# only binary (macOS / no-KVM dev), where `run` requires `--simulated`.
+default = ["firecracker"]
 firecracker = ["lex-os-perimeter/firecracker"]
 
 [dependencies]
