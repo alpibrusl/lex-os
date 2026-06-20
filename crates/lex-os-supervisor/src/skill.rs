@@ -24,15 +24,26 @@ pub fn mediate_skill(actuation: &Actuation, skill: &str, args: &Value) -> SkillV
     let num = |k: &str, default: f64| args.get(k).and_then(Value::as_f64).unwrap_or(default);
     match skill {
         "move_to" => {
-            match actuation.check_move_to(num("x", 0.5), num("y", 0.5), num("z", 0.0)) {
-                Ok(()) => SkillVerdict::Allowed,
-                Err(e) => SkillVerdict::Denied(e),
+            if let Err(e) = actuation.check_move_to(num("x", 0.5), num("y", 0.5), num("z", 0.0)) {
+                return SkillVerdict::Denied(e);
             }
+            // Enforce the velocity cap whenever the caller commands a velocity.
+            // Current move_to args carry only a target pose, so this is usually
+            // a no-op — but it makes `max_velocity_mps` a real gate the moment a
+            // skill conveys speed, rather than a declared-but-ignored cap.
+            if let Some(v) = args.get("velocity").and_then(Value::as_f64) {
+                if let Err(e) = actuation.check_velocity(v) {
+                    return SkillVerdict::Denied(e);
+                }
+            }
+            SkillVerdict::Allowed
         }
         "grasp" => match actuation.check_grasp(num("force", 0.0)) {
             Ok(()) => SkillVerdict::Allowed,
             Err(e) => SkillVerdict::Denied(e),
         },
+        // `arm.max_force_n` is reserved for a force-controlled skill (none in
+        // the current set conveys an arm force; grasp uses the gripper cap).
         _ => SkillVerdict::Allowed,
     }
 }
@@ -72,6 +83,21 @@ mod tests {
     #[test]
     fn over_force_grasp_denied() {
         assert!(matches!(mediate_skill(&act(), "grasp", &json!({"force":50.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn over_velocity_move_denied() {
+        // act()'s max_velocity_mps is 0.25; an in-workspace move at 2.0 m/s is denied.
+        assert!(matches!(
+            mediate_skill(&act(), "move_to", &json!({"x":0.3,"y":0.0,"z":0.2,"velocity":2.0})),
+            SkillVerdict::Denied(_)
+        ));
+    }
+    #[test]
+    fn in_cap_velocity_move_allowed() {
+        assert_eq!(
+            mediate_skill(&act(), "move_to", &json!({"x":0.3,"y":0.0,"z":0.2,"velocity":0.2})),
+            SkillVerdict::Allowed
+        );
     }
     #[test]
     fn run_policy_passes_allowlist_gate() {

@@ -84,6 +84,18 @@ impl Actuation {
         }
         Ok(())
     }
+
+    /// Check a commanded arm velocity against `max_velocity_mps`. Negative
+    /// (magnitude) speeds are compared by absolute value.
+    pub fn check_velocity(&self, velocity_mps: f64) -> Result<(), String> {
+        if velocity_mps.abs() > self.arm.max_velocity_mps {
+            return Err(format!(
+                "velocity {velocity_mps} m/s exceeds max_velocity_mps {}",
+                self.arm.max_velocity_mps
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
