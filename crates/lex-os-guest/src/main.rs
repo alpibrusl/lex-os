@@ -191,10 +191,13 @@ fn connect_transport() -> anyhow::Result<Box<dyn GuestTransport>> {
 // ── Robot scripts ─────────────────────────────────────────────────────────────
 
 /// The sidecar endpoint as seen from inside the guest. Defaults to the
-/// tap-side host IP (the same address the Ollama path uses) and the
-/// sidecar's default port. Override with LEX_ROBOT_SIDECAR.
+/// Firecracker tap gateway (the host as seen from the guest's /30 — the host
+/// side of `host_ip_cidr` 169.254.42.1/30 in lex-os-perimeter), where a
+/// host-local sidecar bound to 0.0.0.0 is reachable and the grant's egress
+/// allowlist installs the matching INPUT accept. (Not 10.0.2.2 — that's a
+/// QEMU-slirp alias, not a Firecracker address.) Override with LEX_ROBOT_SIDECAR.
 fn sidecar_url() -> String {
-    std::env::var("LEX_ROBOT_SIDECAR").unwrap_or_else(|_| "http://10.0.2.2:8900".into())
+    std::env::var("LEX_ROBOT_SIDECAR").unwrap_or_else(|_| "http://169.254.42.1:8900".into())
 }
 
 /// Deterministic robot planner. `robot-demo` walks the in-grant happy path;
