@@ -281,7 +281,7 @@ fn call_sidecar(base: &str, skill: &str, args: &Value) -> anyhow::Result<String>
     use anyhow::Context;
     let url = format!("{base}/skill/{skill}");
     let resp = ureq::post(&url).send_json(args.clone()).context("sidecar request")?;
-    Ok(resp.into_string().context("sidecar body")?)
+    resp.into_string().context("sidecar body")
 }
 
 /// Pull the `outcome` field out of the sidecar JSON; default to "reached"
