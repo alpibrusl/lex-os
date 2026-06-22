@@ -18,6 +18,11 @@ pub trait Transport: Send {
     /// Block until the guest sends back an action (one JSON line).
     fn recv_action(&mut self) -> anyhow::Result<AgentActionMsg>;
 
+    /// Send the supervisor's per-skill decision to the guest (one JSON line).
+    fn send_decision(&mut self, decision: &crate::msg::SkillDecisionMsg) -> anyhow::Result<()>;
+    /// Block until the guest reports a skill outcome (one JSON line).
+    fn recv_outcome(&mut self) -> anyhow::Result<crate::msg::SkillOutcomeMsg>;
+
     /// Re-establish the channel after the box was rebuilt (the old guest is
     /// gone). For a vsock host transport this drops the dead stream so the next
     /// send/recv re-`accept()`s the fresh guest. Default: no-op — in-process and
@@ -31,6 +36,8 @@ pub trait Transport: Send {
 pub trait GuestTransport: Send {
     fn recv_view(&mut self) -> anyhow::Result<AgentViewMsg>;
     fn send_action(&mut self, action: &AgentActionMsg) -> anyhow::Result<()>;
+    fn recv_decision(&mut self) -> anyhow::Result<crate::msg::SkillDecisionMsg>;
+    fn send_outcome(&mut self, outcome: &crate::msg::SkillOutcomeMsg) -> anyhow::Result<()>;
 }
 
 // ── In-process simulated pair ─────────────────────────────────────────────────
@@ -75,6 +82,16 @@ impl Transport for SimulatedTransport {
         let line = self.rx.recv().context("recv action")?;
         serde_json::from_str(&line).context("deserialise action")
     }
+
+    fn send_decision(&mut self, decision: &crate::msg::SkillDecisionMsg) -> anyhow::Result<()> {
+        let line = serde_json::to_string(decision).context("serialise decision")?;
+        self.tx.send(line).context("send decision")?;
+        Ok(())
+    }
+    fn recv_outcome(&mut self) -> anyhow::Result<crate::msg::SkillOutcomeMsg> {
+        let line = self.rx.recv().context("recv outcome")?;
+        serde_json::from_str(&line).context("deserialise outcome")
+    }
 }
 
 impl GuestTransport for SimulatedGuestTransport {
@@ -86,6 +103,16 @@ impl GuestTransport for SimulatedGuestTransport {
     fn send_action(&mut self, action: &AgentActionMsg) -> anyhow::Result<()> {
         let line = serde_json::to_string(action).context("serialise action")?;
         self.tx.send(line).context("send action")?;
+        Ok(())
+    }
+
+    fn recv_decision(&mut self) -> anyhow::Result<crate::msg::SkillDecisionMsg> {
+        let line = self.rx.recv().context("recv decision")?;
+        serde_json::from_str(&line).context("deserialise decision")
+    }
+    fn send_outcome(&mut self, outcome: &crate::msg::SkillOutcomeMsg) -> anyhow::Result<()> {
+        let line = serde_json::to_string(outcome).context("serialise outcome")?;
+        self.tx.send(line).context("send outcome")?;
         Ok(())
     }
 }
@@ -122,6 +149,19 @@ impl<R: BufRead + Send, W: Write + Send> Transport for StreamTransport<R, W> {
         self.reader.read_line(&mut line).context("read action")?;
         serde_json::from_str(line.trim()).context("deserialise action")
     }
+
+    fn send_decision(&mut self, decision: &crate::msg::SkillDecisionMsg) -> anyhow::Result<()> {
+        let mut line = serde_json::to_string(decision).context("serialise decision")?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).context("write decision")?;
+        self.writer.flush().context("flush")?;
+        Ok(())
+    }
+    fn recv_outcome(&mut self) -> anyhow::Result<crate::msg::SkillOutcomeMsg> {
+        let mut line = String::new();
+        self.reader.read_line(&mut line).context("read outcome")?;
+        serde_json::from_str(line.trim()).context("deserialise outcome")
+    }
 }
 
 /// Guest-side mirror over a stream pair.
@@ -149,6 +189,19 @@ impl<R: BufRead + Send, W: Write + Send> GuestTransport for StreamGuestTransport
         self.writer
             .write_all(line.as_bytes())
             .context("write action")?;
+        self.writer.flush().context("flush")?;
+        Ok(())
+    }
+
+    fn recv_decision(&mut self) -> anyhow::Result<crate::msg::SkillDecisionMsg> {
+        let mut line = String::new();
+        self.reader.read_line(&mut line).context("read decision")?;
+        serde_json::from_str(line.trim()).context("deserialise decision")
+    }
+    fn send_outcome(&mut self, outcome: &crate::msg::SkillOutcomeMsg) -> anyhow::Result<()> {
+        let mut line = serde_json::to_string(outcome).context("serialise outcome")?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).context("write outcome")?;
         self.writer.flush().context("flush")?;
         Ok(())
     }
@@ -198,6 +251,24 @@ mod tests {
         guest.recv_view().unwrap();
         guest.send_action(&AgentActionMsg::Done).unwrap();
         assert!(matches!(host.recv_action().unwrap(), AgentActionMsg::Done));
+    }
+
+    #[test]
+    fn simulated_pair_skill_handshake() {
+        use crate::msg::{SkillDecisionMsg, SkillOutcomeMsg};
+        let (mut host, mut guest) = simulated_pair();
+
+        // Host decides, guest receives.
+        host.send_decision(&SkillDecisionMsg { allowed: true, reason: None }).unwrap();
+        let d = guest.recv_decision().unwrap();
+        assert!(d.allowed);
+
+        // Guest reports outcome, host receives.
+        guest.send_outcome(&SkillOutcomeMsg {
+            outcome: "reached".into(), observation: "{}".into(),
+        }).unwrap();
+        let o = host.recv_outcome().unwrap();
+        assert_eq!(o.outcome, "reached");
     }
 
     #[test]

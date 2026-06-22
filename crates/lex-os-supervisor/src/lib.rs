@@ -20,10 +20,12 @@
 
 mod budget;
 mod command;
+mod skill;
 mod vsock_agent;
 
 pub use budget::{BudgetLedger, Charge};
 pub use command::{Command, CommandRegistry};
+pub use skill::{mediate_skill, SkillVerdict};
 pub use vsock_agent::VsockAgent;
 
 use lex_os_audit::{AuditLog, Event};
@@ -79,6 +81,8 @@ impl Clock for ManualClock {
 pub enum AgentAction {
     /// Request a mediated command by name.
     Run(String),
+    /// Request a mediated robot skill with structured arguments.
+    RunSkill { skill: String, args: serde_json::Value },
     /// Deliberately destroy the box (allowed — it is disposable).
     Destroy(String),
     /// Claim the goal is met (the supervisor still decides to stop).
@@ -115,6 +119,14 @@ pub trait Agent {
     /// booted guest. Default: no-op — in-process and scripted agents have
     /// nothing to reconnect.
     fn on_reprovision(&mut self) {}
+
+    /// Deliver the supervisor's decision to the agent and, when allowed,
+    /// return the outcome of executing the effect. Host-side agents that do
+    /// not execute in a guest leave this as the default (`None`). The vsock
+    /// agent overrides it to drive the in-guest effect over the transport.
+    fn execute_skill(&mut self, _decision: &Decision) -> Option<SkillOutcome> {
+        None
+    }
 }
 
 /// External, supervisor-owned progress record. Held outside the box so
@@ -122,6 +134,14 @@ pub trait Agent {
 #[derive(Debug, Clone, Default)]
 pub struct Checkpoint {
     pub completed: Vec<String>,
+}
+
+/// The observed result of executing an approved skill (returned by the
+/// agent's `execute_skill` hook, recorded to the audit log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillOutcome {
+    pub outcome: String,
+    pub observation: String,
 }
 
 /// Why a single mediation decision went the way it did.
@@ -337,6 +357,59 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                         break Outcome::BudgetExhausted(which);
                     }
                 },
+                AgentAction::RunSkill { skill, args } => {
+                    let verdict = match &self.manifest.actuation {
+                        Some(act) => skill::mediate_skill(act, &skill, &args),
+                        None => skill::SkillVerdict::Denied(
+                            "manifest has no actuation grant".into(),
+                        ),
+                    };
+                    audit.append(Event::CommandRequested {
+                        seq: ledger.commands_used(),
+                        command: skill.clone(),
+                        reversibility: "irreversible-bounded".into(),
+                    });
+                    match verdict {
+                        skill::SkillVerdict::Denied(reason) => {
+                            audit.append(Event::CommandDenied {
+                                command: skill.clone(),
+                                reason: reason.clone(),
+                            });
+                            agent.execute_skill(&Decision::Denied(reason.clone()));
+                            last_outcome = Some(format!("`{skill}` denied: {reason}"));
+                        }
+                        skill::SkillVerdict::Allowed => {
+                            let charge = Charge { commands: 1, money_cents: 0, api_calls: 1 };
+                            if let Some(which) = ledger.would_exceed(&charge) {
+                                audit.append(Event::BudgetExhausted { which: which.clone() });
+                                agent.execute_skill(&Decision::BudgetExhausted(which.clone()));
+                                break Outcome::BudgetExhausted(which);
+                            }
+                            ledger.charge(&charge);
+                            audit.append(Event::BudgetCharged {
+                                commands: ledger.commands_used(),
+                                money_cents: ledger.money_used_cents(),
+                                api_calls: ledger.api_calls_used(),
+                                elapsed_secs: ledger.elapsed_secs(self.clock.now_secs()),
+                            });
+                            audit.append(Event::CommandAllowed { command: skill.clone() });
+                            match agent.execute_skill(&Decision::Allowed) {
+                                Some(o) => {
+                                    audit.append(Event::SkillOutcome {
+                                        command: skill.clone(),
+                                        outcome: o.outcome.clone(),
+                                        observation: o.observation.clone(),
+                                    });
+                                    checkpoint.completed.push(skill.clone());
+                                    last_outcome = Some(format!("`{skill}` -> {}", o.outcome));
+                                }
+                                None => {
+                                    last_outcome = Some(format!("`{skill}` allowed (no outcome reported)"));
+                                }
+                            }
+                        }
+                    }
+                }
                 AgentAction::ProposeChild(child) => {
                     // Log the proposal as a command request; narrowing
                     // attempts do NOT consume command budget.
@@ -854,6 +927,58 @@ mod tests {
             .iter()
             .any(|e| matches!(&e.event, Event::NarrowingBlocked { .. }));
         assert!(blocked, "expected NarrowingBlocked in audit log");
+        assert!(report.audit.verify().is_ok());
+    }
+
+    fn actuation_grant() -> lex_os_manifest::Actuation {
+        use lex_os_manifest::{Actuation, ActuatorArm, ActuatorGripper, Range};
+        Actuation {
+            skills: vec!["move_to".into()],
+            arm: ActuatorArm {
+                workspace_m: [Range { min: 0.1, max: 0.5 },
+                              Range { min: -0.3, max: 0.3 },
+                              Range { min: 0.0, max: 0.4 }],
+                max_velocity_mps: 0.25,
+                max_force_n: 15.0,
+            },
+            gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+        }
+    }
+
+    struct SkillScript { step: usize }
+    impl Agent for SkillScript {
+        fn next_action(&mut self, _v: &AgentView) -> AgentAction {
+            self.step += 1;
+            match self.step {
+                1 => AgentAction::RunSkill { skill: "move_to".into(), args: serde_json::json!({"x":0.3,"y":0.0,"z":0.2}) },
+                2 => AgentAction::RunSkill { skill: "move_to".into(), args: serde_json::json!({"x":0.9,"y":0.0}) },
+                _ => AgentAction::Done,
+            }
+        }
+        fn execute_skill(&mut self, _decision: &Decision) -> Option<SkillOutcome> {
+            Some(SkillOutcome { outcome: "reached".into(), observation: "{}".into() })
+        }
+    }
+
+    #[test]
+    fn skill_mediation_allows_then_denies_and_audits_outcome() {
+        let mut manifest = manifest(
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        manifest.actuation = Some(actuation_grant());
+        let sup = Supervisor::new(
+            manifest,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let mut ag = SkillScript { step: 0 };
+        let report = sup.run(&Environment::full(), &mut ag).unwrap();
+        let nd = report.audit.to_ndjson().unwrap();
+        assert!(nd.contains("skill_outcome"));
+        assert!(nd.contains("not in the grant") || nd.contains("outside workspace"));
         assert!(report.audit.verify().is_ok());
     }
 }

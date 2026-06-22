@@ -79,6 +79,25 @@ impl<T: Transport> Agent for VsockAgent<T> {
         }
     }
 
+    fn execute_skill(&mut self, decision: &crate::Decision) -> Option<crate::SkillOutcome> {
+        use lex_os_proto::msg::SkillDecisionMsg;
+        let (allowed, reason) = match decision {
+            crate::Decision::Allowed => (true, None),
+            crate::Decision::Denied(r) => (false, Some(r.clone())),
+            crate::Decision::BudgetExhausted(r) => (false, Some(r.clone())),
+        };
+        if self.transport.send_decision(&SkillDecisionMsg { allowed, reason }).is_err() {
+            return None;
+        }
+        if !allowed {
+            return None; // guest will not execute; nothing to await
+        }
+        match self.transport.recv_outcome() {
+            Ok(o) => Some(crate::SkillOutcome { outcome: o.outcome, observation: o.observation }),
+            Err(_) => None,
+        }
+    }
+
     fn on_reprovision(&mut self) {
         // The old guest is gone with the old box; re-attach the channel so the
         // next `next_action` reaches the freshly booted guest, and clear the
@@ -93,6 +112,7 @@ impl<T: Transport> Agent for VsockAgent<T> {
 fn convert(msg: AgentActionMsg, _parent: &Manifest) -> AgentAction {
     match msg {
         AgentActionMsg::Run { command } => AgentAction::Run(command),
+        AgentActionMsg::RunSkill { skill, args } => AgentAction::RunSkill { skill, args },
         AgentActionMsg::Done => AgentAction::Done,
         AgentActionMsg::Destroy { reason } => AgentAction::Destroy(reason),
         AgentActionMsg::ProposeChild { .. } => {
@@ -236,6 +256,15 @@ mod tests {
                     command: "fs.read".into(),
                 })
             }
+            fn send_decision(
+                &mut self,
+                _d: &lex_os_proto::msg::SkillDecisionMsg,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn recv_outcome(&mut self) -> anyhow::Result<lex_os_proto::msg::SkillOutcomeMsg> {
+                anyhow::bail!("no outcome")
+            }
             fn reconnect(&mut self) -> anyhow::Result<()> {
                 *self.reconnects.lock().unwrap() += 1;
                 *self.fail.lock().unwrap() = false; // the rebuilt guest is reachable
@@ -270,6 +299,29 @@ mod tests {
             agent.next_action(&make_view(0)),
             AgentAction::Run(c) if c == "fs.read"
         ));
+    }
+
+    #[test]
+    fn execute_skill_relays_decision_and_returns_outcome() {
+        use lex_os_proto::transport::{simulated_pair, GuestTransport};
+        use lex_os_proto::msg::{SkillDecisionMsg, SkillOutcomeMsg};
+        use crate::{Agent, Decision};
+
+        let (host, mut guest) = simulated_pair();
+        let mut agent = VsockAgent::new(host, parent());
+
+        // Guest side: expect a decision, then reply with an outcome.
+        let guest_thread = std::thread::spawn(move || {
+            let d: SkillDecisionMsg = guest.recv_decision().unwrap();
+            assert!(d.allowed);
+            guest.send_outcome(&SkillOutcomeMsg {
+                outcome: "reached".into(), observation: "{\"coverage\":0.9}".into(),
+            }).unwrap();
+        });
+
+        let out = agent.execute_skill(&Decision::Allowed).unwrap();
+        assert_eq!(out.outcome, "reached");
+        guest_thread.join().unwrap();
     }
 
     #[test]

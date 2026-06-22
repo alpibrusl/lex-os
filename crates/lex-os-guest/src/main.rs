@@ -48,6 +48,10 @@ fn main() -> anyhow::Result<()> {
         return run_reprovision_demo(transport.as_mut());
     }
 
+    if script == "robot-demo" || script == "robot-violation" {
+        return run_robot(transport.as_mut(), &script, &sidecar_url());
+    }
+
     // Give up after this many consecutive denied/blocked outcomes. A real model
     // may keep hammering a wall (devstral does); the agent must recognise it's
     // stuck and stop rather than loop until the supervisor's step ceiling.
@@ -182,6 +186,111 @@ fn connect_transport() -> anyhow::Result<Box<dyn GuestTransport>> {
         let t = StreamGuestTransport::new(BufReader::new(std::io::stdin()), std::io::stdout());
         Ok(Box::new(t))
     }
+}
+
+// ── Robot scripts ─────────────────────────────────────────────────────────────
+
+/// The sidecar endpoint as seen from inside the guest. Defaults to the
+/// Firecracker tap gateway (the host as seen from the guest's /30 — the host
+/// side of `host_ip_cidr` 169.254.42.1/30 in lex-os-perimeter), where a
+/// host-local sidecar bound to 0.0.0.0 is reachable and the grant's egress
+/// allowlist installs the matching INPUT accept. (Not 10.0.2.2 — that's a
+/// QEMU-slirp alias, not a Firecracker address.) Override with LEX_ROBOT_SIDECAR.
+fn sidecar_url() -> String {
+    std::env::var("LEX_ROBOT_SIDECAR").unwrap_or_else(|_| "http://169.254.42.1:8900".into())
+}
+
+/// Deterministic robot planner. `robot-demo` walks the in-grant happy path;
+/// `robot-violation` issues a single out-of-workspace move to prove the
+/// supervisor's run-time Denied.
+fn robot_action(script: &str, view: &AgentViewMsg) -> AgentActionMsg {
+    let done = |c: &str| view.completed.iter().any(|x| x == c);
+    if script == "robot-violation" {
+        // Issue exactly ONE out-of-workspace move (on the first step), then
+        // stop. We key off `view.step`, not `completed`, because a *denied*
+        // skill is never added to `completed` — keying off `completed` would
+        // re-propose the rejected move forever until the step ceiling.
+        if view.step == 0 {
+            return AgentActionMsg::RunSkill {
+                skill: "move_to".into(),
+                args: serde_json::json!({"x": 0.9, "y": 0.0, "z": 0.2}),
+            };
+        }
+        return AgentActionMsg::Done;
+    }
+    // robot-demo happy path: move_to -> grasp -> run_policy -> done.
+    if !done("move_to") {
+        AgentActionMsg::RunSkill {
+            skill: "move_to".into(),
+            args: serde_json::json!({"x": 0.3, "y": 0.0, "z": 0.2}),
+        }
+    } else if !done("grasp") {
+        AgentActionMsg::RunSkill {
+            skill: "grasp".into(),
+            args: serde_json::json!({"force": 10.0}),
+        }
+    } else if !done("run_policy") {
+        AgentActionMsg::RunSkill {
+            skill: "run_policy".into(),
+            args: serde_json::json!({"name": "lerobot/diffusion_pusht", "goal": "solve", "budget_ms": 10000}),
+        }
+    } else {
+        AgentActionMsg::Done
+    }
+}
+
+fn run_robot(transport: &mut dyn GuestTransport, script: &str, sidecar: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+    loop {
+        let view = transport.recv_view().context("recv view")?;
+        let action = robot_action(script, &view);
+        eprintln!(
+            "[guest:robot] step={} completed={:?} -> {action:?}",
+            view.step, view.completed
+        );
+        let terminal = matches!(action, AgentActionMsg::Done | AgentActionMsg::Destroy { .. });
+        let pending = if let AgentActionMsg::RunSkill { ref skill, ref args } = action {
+            Some((skill.clone(), args.clone()))
+        } else {
+            None
+        };
+        transport.send_action(&action).context("send action")?;
+        if terminal {
+            break;
+        }
+        if let Some((skill, args)) = pending {
+            let decision = transport.recv_decision().context("recv decision")?;
+            if decision.allowed {
+                let observation = call_sidecar(sidecar, &skill, &args)
+                    .unwrap_or_else(|e| format!("{{\"outcome\":\"stalled\",\"detail\":\"{e}\"}}"));
+                let outcome = parse_outcome(&observation);
+                transport
+                    .send_outcome(&lex_os_proto::msg::SkillOutcomeMsg { outcome, observation })
+                    .context("send outcome")?;
+            } else {
+                eprintln!("[guest:robot] denied: {:?}", decision.reason);
+            }
+        }
+    }
+    eprintln!("[guest:robot] loop complete");
+    Ok(())
+}
+
+/// POST the skill to the sidecar; return the raw JSON body as a string.
+fn call_sidecar(base: &str, skill: &str, args: &Value) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let url = format!("{base}/skill/{skill}");
+    let resp = ureq::post(&url).send_json(args.clone()).context("sidecar request")?;
+    resp.into_string().context("sidecar body")
+}
+
+/// Pull the `outcome` field out of the sidecar JSON; default to "reached"
+/// for sense skills that return no outcome field.
+fn parse_outcome(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("outcome").and_then(|o| o.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "reached".into())
 }
 
 // ── Prompt construction ───────────────────────────────────────────────────────
@@ -390,5 +499,50 @@ mod tests {
             scripted_action(&view(&["fs.read", "report.write"], 1)),
             AgentActionMsg::Done
         ));
+    }
+
+    fn robot_view(step: u64, completed: &[&str]) -> AgentViewMsg {
+        AgentViewMsg {
+            goal: "pick-place".into(),
+            step,
+            last_outcome: None,
+            completed: completed.iter().map(|s| s.to_string()).collect(),
+            reprovisions: 0,
+        }
+    }
+
+    #[test]
+    fn robot_demo_runs_skills_in_order_then_done() {
+        assert!(matches!(robot_action("robot-demo", &robot_view(1, &[])),
+            AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_to"));
+        assert!(matches!(
+            robot_action("robot-demo", &robot_view(4, &["move_to", "grasp", "run_policy"])),
+            AgentActionMsg::Done
+        ));
+    }
+
+    #[test]
+    fn robot_violation_requests_out_of_workspace_move_once_then_done() {
+        // First step: propose the out-of-workspace move.
+        match robot_action("robot-violation", &robot_view(0, &[])) {
+            AgentActionMsg::RunSkill { skill, args } => {
+                assert_eq!(skill, "move_to");
+                assert!(args.get("x").unwrap().as_f64().unwrap() > 0.5);
+            }
+            other => panic!("expected out-of-workspace move, got {other:?}"),
+        }
+        // After the (denied) first step, it must terminate rather than loop —
+        // denials never populate `completed`, so it keys off `step`.
+        assert!(matches!(
+            robot_action("robot-violation", &robot_view(1, &[])),
+            AgentActionMsg::Done
+        ));
+    }
+
+    #[test]
+    fn parse_outcome_extracts_field() {
+        assert_eq!(parse_outcome(r#"{"outcome":"reached","coverage":0.9}"#), "reached");
+        assert_eq!(parse_outcome("not json"), "reached");
+        assert_eq!(parse_outcome(r#"{"status":"ok"}"#), "reached");
     }
 }

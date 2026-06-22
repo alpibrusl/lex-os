@@ -55,6 +55,7 @@ Options:
           - anthropic: Anthropic Claude (ANTHROPIC_API_KEY env var required)
           - open-ai:   OpenAI-compatible endpoint (OPENAI_API_KEY env var required)
           - guest:     Spawn lex-os-guest as a subprocess (stdio transport). The guest binary calls Ollama itself. Use this on macOS for a full end-to-end test without Firecracker; on Linux with --features firecracker the guest runs inside the microVM over vsock instead
+          - robot:     In-guest robot agent that issues move_to/grasp/run_policy as supervisor-mediated skills against the gym sidecar
           
           [default: demo]
 

@@ -14,6 +14,9 @@
 
 pub use lex_types::trust::{Dimension, Grant, GrantId, Level, TrustError};
 
+mod actuation;
+pub use actuation::{Actuation, ActuatorArm, ActuatorGripper, Range};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -159,6 +162,10 @@ pub struct Manifest {
     /// and the perimeter firewall are derived from.
     #[serde(default)]
     pub egress: Vec<String>,
+    /// The robot half of the grant. `None` for ordinary agent boxes; when
+    /// present, the supervisor mediates each skill's arguments against it.
+    #[serde(default)]
+    pub actuation: Option<Actuation>,
 }
 
 /// Content address of a [`Manifest`].
@@ -206,6 +213,7 @@ impl Manifest {
             budget,
             isolation_floor,
             egress: Vec::new(),
+            actuation: None,
         }
     }
 
@@ -325,6 +333,7 @@ impl Manifest {
             // The child inherits the parent's egress; narrowing can drop
             // hosts but never add them, so inheriting is always safe.
             egress: self.egress.clone(),
+            actuation: self.actuation.clone(),
         })
     }
 
@@ -362,6 +371,7 @@ impl Manifest {
             },
             "isolation_floor": self.isolation_floor.as_str(),
             "egress": egress,
+            "actuation": self.actuation,
         });
         serde_json::to_string(&v).expect("manifest json is always serializable")
     }
@@ -583,5 +593,33 @@ mod tests {
         assert_eq!(m, back);
         assert_eq!(m.content_id(), back.content_id());
         assert_eq!(m.content_id().0.len(), 64);
+    }
+
+    #[test]
+    fn actuation_is_optional_and_roundtrips() {
+        // A manifest with no actuation behaves as before.
+        let plain = analyze_manifest();
+        assert!(plain.actuation.is_none());
+        let back = Manifest::from_json(&plain.to_json().unwrap()).unwrap();
+        assert_eq!(plain.content_id(), back.content_id());
+
+        // Adding actuation changes the content address and survives a roundtrip.
+        let with_act = Manifest {
+            actuation: Some(Actuation {
+                skills: vec!["move_to".into()],
+                arm: ActuatorArm {
+                    workspace_m: [Range { min: 0.1, max: 0.5 },
+                                  Range { min: -0.3, max: 0.3 },
+                                  Range { min: 0.0, max: 0.4 }],
+                    max_velocity_mps: 0.25,
+                    max_force_n: 15.0,
+                },
+                gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+            }),
+            ..plain.clone()
+        };
+        assert_ne!(plain.content_id(), with_act.content_id());
+        let back2 = Manifest::from_json(&with_act.to_json().unwrap()).unwrap();
+        assert_eq!(back2.actuation, with_act.actuation);
     }
 }
