@@ -942,6 +942,7 @@ mod tests {
                 max_force_n: 15.0,
             },
             gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+            base: None,
         }
     }
 

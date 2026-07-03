@@ -48,7 +48,11 @@ fn main() -> anyhow::Result<()> {
         return run_reprovision_demo(transport.as_mut());
     }
 
-    if script == "robot-demo" || script == "robot-violation" {
+    if script == "robot-demo"
+        || script == "robot-violation"
+        || script == "xlerobot-demo"
+        || script == "xlerobot-violation"
+    {
         return run_robot(transport.as_mut(), &script, &sidecar_url());
     }
 
@@ -217,6 +221,40 @@ fn robot_action(script: &str, view: &AgentViewMsg) -> AgentActionMsg {
             };
         }
         return AgentActionMsg::Done;
+    }
+    if script == "xlerobot-violation" {
+        // One out-of-floor-area base move (the kitchen doorway is not granted),
+        // then stop — the supervisor must deny it at the perimeter.
+        if view.step == 0 {
+            return AgentActionMsg::RunSkill {
+                skill: "move_base".into(),
+                args: serde_json::json!({"x": 9.0, "y": 1.5, "speed": 0.3}),
+            };
+        }
+        return AgentActionMsg::Done;
+    }
+    if script == "xlerobot-demo" {
+        // XLeRobot fetch happy path: move_base -> move_arm -> grasp_arm -> done.
+        // (`completed` records one entry per distinct skill name, so the demo
+        // issues one drive; the staging choreography lives in lex-robot.)
+        return if !done("move_base") {
+            AgentActionMsg::RunSkill {
+                skill: "move_base".into(),
+                args: serde_json::json!({"x": 2.55, "y": 0.85, "speed": 0.3}),
+            }
+        } else if !done("move_arm") {
+            AgentActionMsg::RunSkill {
+                skill: "move_arm".into(),
+                args: serde_json::json!({"arm": "left", "x": 0.35, "y": 0.0, "z": 0.35}),
+            }
+        } else if !done("grasp_arm") {
+            AgentActionMsg::RunSkill {
+                skill: "grasp_arm".into(),
+                args: serde_json::json!({"arm": "left", "force": 15.0}),
+            }
+        } else {
+            AgentActionMsg::Done
+        };
     }
     // robot-demo happy path: move_to -> grasp -> run_policy -> done.
     if !done("move_to") {
@@ -517,6 +555,33 @@ mod tests {
             AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_to"));
         assert!(matches!(
             robot_action("robot-demo", &robot_view(4, &["move_to", "grasp", "run_policy"])),
+            AgentActionMsg::Done
+        ));
+    }
+
+    #[test]
+    fn xlerobot_demo_runs_base_then_arm_then_grasp() {
+        assert!(matches!(robot_action("xlerobot-demo", &robot_view(0, &[])),
+            AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_base"));
+        assert!(matches!(robot_action("xlerobot-demo", &robot_view(1, &["move_base"])),
+            AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_arm"));
+        assert!(matches!(
+            robot_action("xlerobot-demo", &robot_view(3, &["move_base", "move_arm", "grasp_arm"])),
+            AgentActionMsg::Done
+        ));
+    }
+
+    #[test]
+    fn xlerobot_violation_requests_out_of_floor_area_drive_once_then_done() {
+        match robot_action("xlerobot-violation", &robot_view(0, &[])) {
+            AgentActionMsg::RunSkill { skill, args } => {
+                assert_eq!(skill, "move_base");
+                assert!(args.get("x").unwrap().as_f64().unwrap() > 4.0);
+            }
+            other => panic!("expected out-of-floor-area drive, got {other:?}"),
+        }
+        assert!(matches!(
+            robot_action("xlerobot-violation", &robot_view(1, &[])),
             AgentActionMsg::Done
         ));
     }
