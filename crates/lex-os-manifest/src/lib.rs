@@ -15,7 +15,7 @@
 pub use lex_types::trust::{Dimension, Grant, GrantId, Level, TrustError};
 
 mod actuation;
-pub use actuation::{Actuation, ActuatorArm, ActuatorGripper, Range};
+pub use actuation::{Actuation, ActuatorArm, ActuatorBase, ActuatorGripper, Range};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -615,6 +615,7 @@ mod tests {
                     max_force_n: 15.0,
                 },
                 gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+                base: None,
             }),
             ..plain.clone()
         };

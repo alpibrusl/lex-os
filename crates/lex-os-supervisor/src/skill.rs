@@ -17,18 +17,47 @@ pub enum SkillVerdict {
 
 /// Mediate one skill request against the actuation grant. Pure: no audit,
 /// no budget (the run loop owns those, reusing the existing gates).
+/// Skills a grant may name that carry no supervisor-checkable bounds by
+/// design: sensing reads, resets, releases, and the delegated paths whose
+/// arguments are governed elsewhere (`run_policy` hands the high-rate loop to
+/// the sidecar under its own budget; `policy_action`/`apply_action` are the
+/// step-wise path where the in-box Lex grant vets every command). Everything
+/// NOT in this registry and NOT carrying a mediation rule below is REFUSED —
+/// the resolver rule (refuse, don't downgrade): a skill the supervisor cannot
+/// bound must not be silently admitted just because its name was granted.
+const UNBOUNDED_BY_DESIGN: &[&str] = &[
+    "read_joints",
+    "read_camera",
+    "read_base",
+    "read_inlet",
+    "workpiece_status",
+    "reset",
+    "reset_depot",
+    "reset_episode",
+    "release_arm",
+    "disconnect_charger",
+    "run_policy",
+    "record_episode",
+    "policy_action",
+    "apply_action",
+    "clamp_workpiece",
+];
+
 pub fn mediate_skill(actuation: &Actuation, skill: &str, args: &Value) -> SkillVerdict {
     if !actuation.allows(skill) {
         return SkillVerdict::Denied(format!("skill `{skill}` not in the grant"));
     }
     let num = |k: &str, default: f64| args.get(k).and_then(Value::as_f64).unwrap_or(default);
     match skill {
-        "move_to" => {
+        // Arm reaches: `move_to` (single-arm robots) and `move_arm` (the
+        // XLeRobot's per-arm variant) are the same check — the target must
+        // land inside the arm workspace box.
+        "move_to" | "move_arm" => {
             if let Err(e) = actuation.check_move_to(num("x", 0.5), num("y", 0.5), num("z", 0.0)) {
                 return SkillVerdict::Denied(e);
             }
             // Enforce the velocity cap whenever the caller commands a velocity.
-            // Current move_to args carry only a target pose, so this is usually
+            // Current move args carry only a target pose, so this is usually
             // a no-op — but it makes `max_velocity_mps` a real gate the moment a
             // skill conveys speed, rather than a declared-but-ignored cap.
             if let Some(v) = args.get("velocity").and_then(Value::as_f64) {
@@ -38,13 +67,41 @@ pub fn mediate_skill(actuation: &Actuation, skill: &str, args: &Value) -> SkillV
             }
             SkillVerdict::Allowed
         }
-        "grasp" => match actuation.check_grasp(num("force", 0.0)) {
+        // Grips: `grasp` and the XLeRobot's `grasp_arm` — the gripper cap.
+        "grasp" | "grasp_arm" => match actuation.check_grasp(num("force", 0.0)) {
             Ok(()) => SkillVerdict::Allowed,
             Err(e) => SkillVerdict::Denied(e),
         },
-        // `arm.max_force_n` is reserved for a force-controlled skill (none in
-        // the current set conveys an arm force; grasp uses the gripper cap).
-        _ => SkillVerdict::Allowed,
+        // Mobile base: target inside the granted floor area, speed under the
+        // cap. A manifest without a `base` block refuses every base move.
+        "move_base" => {
+            if let Err(e) = actuation.check_move_base(num("x", 0.0), num("y", 0.0)) {
+                return SkillVerdict::Denied(e);
+            }
+            if let Some(v) = args.get("speed").and_then(Value::as_f64) {
+                if let Err(e) = actuation.check_base_speed(v) {
+                    return SkillVerdict::Denied(e);
+                }
+            }
+            SkillVerdict::Allowed
+        }
+        // Insertion force: `arm.max_force_n` is the transient-contact cap
+        // (ISO/TS 15066-derived in production grants).
+        "connect_charger" => {
+            if let Some(f) = args.get("force").and_then(Value::as_f64) {
+                if f > actuation.arm.max_force_n {
+                    return SkillVerdict::Denied(format!(
+                        "force {f}N exceeds max_force_n {}",
+                        actuation.arm.max_force_n
+                    ));
+                }
+            }
+            SkillVerdict::Allowed
+        }
+        other if UNBOUNDED_BY_DESIGN.contains(&other) => SkillVerdict::Allowed,
+        other => SkillVerdict::Denied(format!(
+            "skill `{other}` has no supervisor mediation rule — refused (refuse, don't downgrade)"
+        )),
     }
 }
 
@@ -65,6 +122,21 @@ mod tests {
                 max_force_n: 15.0,
             },
             gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+            base: None,
+        }
+    }
+
+    fn act_xle() -> Actuation {
+        use lex_os_manifest::ActuatorBase;
+        Actuation {
+            skills: vec![
+                "move_arm".into(), "grasp_arm".into(), "move_base".into(), "read_base".into(),
+            ],
+            base: Some(ActuatorBase {
+                floor_area_m: [Range { min: 0.0, max: 4.0 }, Range { min: 0.0, max: 3.0 }],
+                max_speed_mps: 0.5,
+            }),
+            ..act()
         }
     }
 
@@ -102,5 +174,55 @@ mod tests {
     #[test]
     fn run_policy_passes_allowlist_gate() {
         assert_eq!(mediate_skill(&act(), "run_policy", &json!({"name":"x"})), SkillVerdict::Allowed);
+    }
+    #[test]
+    fn move_arm_checked_like_move_to() {
+        assert_eq!(mediate_skill(&act_xle(), "move_arm", &json!({"x":0.3,"y":0.0,"z":0.2})), SkillVerdict::Allowed);
+        assert!(matches!(mediate_skill(&act_xle(), "move_arm", &json!({"x":0.9,"y":0.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn grasp_arm_checked_like_grasp() {
+        assert_eq!(mediate_skill(&act_xle(), "grasp_arm", &json!({"force":10.0})), SkillVerdict::Allowed);
+        assert!(matches!(mediate_skill(&act_xle(), "grasp_arm", &json!({"force":99.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn move_base_checked_against_floor_area_and_speed() {
+        assert_eq!(mediate_skill(&act_xle(), "move_base", &json!({"x":2.5,"y":1.0,"speed":0.3})), SkillVerdict::Allowed);
+        // out of the floor area — the capsule's declared 4x3m room
+        assert!(matches!(mediate_skill(&act_xle(), "move_base", &json!({"x":9.0,"y":1.5})), SkillVerdict::Denied(_)));
+        // over the speed cap
+        assert!(matches!(mediate_skill(&act_xle(), "move_base", &json!({"x":2.5,"y":1.0,"speed":2.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn move_base_without_base_block_refused() {
+        // granted by name, but the manifest declares no base bounds:
+        // refuse, don't downgrade — never admit what cannot be bounded.
+        let mut a = act();
+        a.skills.push("move_base".into());
+        assert!(matches!(mediate_skill(&a, "move_base", &json!({"x":1.0,"y":1.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn connect_charger_force_capped_by_arm_max_force() {
+        let mut a = act();
+        a.skills.push("connect_charger".into());
+        assert_eq!(mediate_skill(&a, "connect_charger", &json!({"force":10.0})), SkillVerdict::Allowed);
+        assert!(matches!(mediate_skill(&a, "connect_charger", &json!({"force":99.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn granted_but_unknown_skill_refused() {
+        // The referee-evasion shape, one layer down (lex-games#21 / lex-robot#77):
+        // a granted name with no mediation rule must be refused, not admitted.
+        let mut a = act();
+        a.skills.push("teleport".into());
+        assert!(matches!(mediate_skill(&a, "teleport", &json!({"x":9.0})), SkillVerdict::Denied(_)));
+    }
+    #[test]
+    fn sensing_and_delegated_skills_still_allowed() {
+        let mut a = act_xle();
+        a.skills.push("read_joints".into());
+        a.skills.push("release_arm".into());
+        assert_eq!(mediate_skill(&a, "read_base", &json!({})), SkillVerdict::Allowed);
+        assert_eq!(mediate_skill(&a, "read_joints", &json!({"arm":"left"})), SkillVerdict::Allowed);
+        assert_eq!(mediate_skill(&a, "release_arm", &json!({"arm":"left"})), SkillVerdict::Allowed);
     }
 }

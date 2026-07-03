@@ -33,6 +33,14 @@ pub struct ActuatorGripper {
     pub max_grip_force_n: f64,
 }
 
+/// Mobile-base actuator bounds (e.g. the XLeRobot 0.4.0's differential base).
+/// `floor_area_m` is `[x, y]` ranges in metres — the permitted floor area.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ActuatorBase {
+    pub floor_area_m: [Range; 2],
+    pub max_speed_mps: f64,
+}
+
 /// The actuation grant: the allowed-skills allowlist + per-actuator caps.
 /// The supervisor's `mediate_skill` reads this to admit or deny each skill
 /// request before the effect runs.
@@ -41,6 +49,12 @@ pub struct Actuation {
     pub skills: Vec<String>,
     pub arm: ActuatorArm,
     pub gripper: ActuatorGripper,
+    /// Optional: absent means no mobile base is granted at all — a `move_base`
+    /// request is then refused (never silently admitted). `skip_serializing_if`
+    /// keeps the canonical JSON — and therefore the content id — of every
+    /// existing base-less manifest unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<ActuatorBase>,
 }
 
 // `Manifest` derives `Eq` (the supervisor's `AgentAction` requires it via
@@ -50,6 +64,7 @@ pub struct Actuation {
 impl Eq for Range {}
 impl Eq for ActuatorArm {}
 impl Eq for ActuatorGripper {}
+impl Eq for ActuatorBase {}
 impl Eq for Actuation {}
 
 impl Actuation {
@@ -85,6 +100,37 @@ impl Actuation {
         Ok(())
     }
 
+    /// Check a `move_base` target `(x, y)` against the granted floor area.
+    /// A grant without a `base` block refuses every base move — the owner
+    /// granted no base authority, so none exists (refuse, don't downgrade).
+    pub fn check_move_base(&self, x: f64, y: f64) -> Result<(), String> {
+        let Some(base) = &self.base else {
+            return Err("no base actuation granted (manifest has no `base` block)".into());
+        };
+        let axes = [("x", x, base.floor_area_m[0]), ("y", y, base.floor_area_m[1])];
+        for (name, v, range) in axes {
+            if !range.contains(v) {
+                return Err(format!(
+                    "{name}={v} outside floor area [{},{}]", range.min, range.max
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check a commanded base speed against `max_speed_mps` (magnitude).
+    pub fn check_base_speed(&self, speed_mps: f64) -> Result<(), String> {
+        let Some(base) = &self.base else {
+            return Err("no base actuation granted (manifest has no `base` block)".into());
+        };
+        if speed_mps.abs() > base.max_speed_mps {
+            return Err(format!(
+                "speed {speed_mps} m/s exceeds max_speed_mps {}", base.max_speed_mps
+            ));
+        }
+        Ok(())
+    }
+
     /// Check a commanded arm velocity against `max_velocity_mps`. Negative
     /// (magnitude) speeds are compared by absolute value.
     pub fn check_velocity(&self, velocity_mps: f64) -> Result<(), String> {
@@ -113,6 +159,17 @@ mod tests {
                 max_force_n: 15.0,
             },
             gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+            base: None,
+        }
+    }
+
+    fn sample_with_base() -> Actuation {
+        Actuation {
+            base: Some(ActuatorBase {
+                floor_area_m: [Range { min: 0.0, max: 4.0 }, Range { min: 0.0, max: 3.0 }],
+                max_speed_mps: 0.5,
+            }),
+            ..sample()
         }
     }
 
@@ -138,5 +195,38 @@ mod tests {
     fn grasp_over_force_denied() {
         assert!(sample().check_grasp(50.0).is_err());
         assert!(sample().check_grasp(10.0).is_ok());
+    }
+
+    #[test]
+    fn move_base_inside_floor_area_ok() {
+        assert!(sample_with_base().check_move_base(2.5, 1.0).is_ok());
+    }
+
+    #[test]
+    fn move_base_outside_floor_area_denied() {
+        let err = sample_with_base().check_move_base(9.0, 1.5).unwrap_err();
+        assert!(err.contains("x=9"));
+    }
+
+    #[test]
+    fn base_speed_over_cap_denied() {
+        assert!(sample_with_base().check_base_speed(2.0).is_err());
+        assert!(sample_with_base().check_base_speed(0.4).is_ok());
+    }
+
+    #[test]
+    fn no_base_block_refuses_base_moves() {
+        // refuse, don't downgrade: a grant without a base block grants nothing.
+        assert!(sample().check_move_base(1.0, 1.0).is_err());
+        assert!(sample().check_base_speed(0.1).is_err());
+    }
+
+    #[test]
+    fn absent_base_keeps_canonical_json_unchanged() {
+        // content-address stability: a None base must not appear in the JSON.
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert!(!json.contains("base"));
+        let round: Actuation = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, sample());
     }
 }
