@@ -28,6 +28,7 @@ pub enum SkillVerdict {
 const UNBOUNDED_BY_DESIGN: &[&str] = &[
     "read_joints",
     "read_camera",
+    "listen",
     "read_base",
     "read_inlet",
     "workpiece_status",
@@ -223,6 +224,8 @@ mod tests {
         a.skills.push("release_arm".into());
         assert_eq!(mediate_skill(&a, "read_base", &json!({})), SkillVerdict::Allowed);
         assert_eq!(mediate_skill(&a, "read_joints", &json!({"arm":"left"})), SkillVerdict::Allowed);
+        a.skills.push("listen".into());
+        assert_eq!(mediate_skill(&a, "listen", &json!({"seconds":3})), SkillVerdict::Allowed);
         assert_eq!(mediate_skill(&a, "release_arm", &json!({"arm":"left"})), SkillVerdict::Allowed);
     }
 }
