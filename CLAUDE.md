@@ -30,6 +30,18 @@ set its own limits, stop.
 - `crates/lex-os-supervisor` — the mediation loop. The order of gates in
   `mediate` (log → reversibility → perimeter → budget → charge → allow)
   is load-bearing: the request is logged before any decision.
+- `crates/lex-os-check` — the static grant↔effect wall: reject agent Lex
+  code whose effects exceed the manifest grant, before it runs. Same
+  grant as the runtime gates — one declaration, two enforcement points.
+- `crates/lex-os-capsule` — capability-addressed distribution: a signed
+  contract binding an artifact to the grant it requires; installing
+  *narrows* the consumer's manifest. Refuse, don't downgrade.
+- `crates/lex-os-proto` — the wire protocol between the supervisor and
+  the in-guest agent binary.
+- `crates/lex-os-guest` — the agent binary that runs **inside** the
+  microVM: connects to the host supervisor over vsock and drives the
+  reasoning loop. It is on the untrusted side of the boundary; never
+  give it authority the supervisor is supposed to mediate.
 - `crates/lex-os` — the CLI; emits acli envelopes and semantic exit codes.
 - `manifests/` — the manifest format + bounded commands as a Lex package.
 
