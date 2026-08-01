@@ -113,6 +113,7 @@ cargo run -p lex-os -- manifest hash --manifest m.json   # its content-address
 cargo run -p lex-os -- run --simulated --manifest m.json --audit-out audit.json
 cargo run -p lex-os -- audit verify --log audit.json     # check the hash chain
 cargo run -p lex-os -- audit render --log audit.json     # NDJSON view
+cargo run -p lex-os -- audit tail --log audit.json       # follow the log live
 cargo run -p lex-os -- introspect                # acli command tree
 ```
 
@@ -148,14 +149,18 @@ order is load-bearing: log → reversibility → perimeter → budget → charge
 
 ### Driving a real LLM (simulated perimeter)
 
-The agent brain is pluggable. Beyond the scripted `demo` agent, `run`
-takes `--agent {ollama,anthropic,openai,guest}`. Off a KVM host, pass
-`--simulated` (the real microVM perimeter is the default and would otherwise
-refuse — see below):
+The agent brain is pluggable — lex-os is provider-agnostic, not built
+around any one model vendor. Beyond the scripted `demo` agent, `run`
+takes `--agent {ollama,anthropic,open-ai,guest}`; `open-ai` speaks the
+OpenAI-compatible chat-completions shape, so it works against any
+endpoint that implements it, not just OpenAI's own API. Off a KVM host,
+pass `--simulated` (the real microVM perimeter is the default and would
+otherwise refuse — see below):
 
 ```sh
 cargo run -p lex-os -- run --simulated --agent ollama --model mistral
 cargo run -p lex-os -- run --simulated --agent anthropic --model claude-...  # ANTHROPIC_API_KEY
+cargo run -p lex-os -- run --simulated --agent open-ai --model gpt-4o-mini   # OPENAI_API_KEY
 cargo run -p lex-os -- run --simulated --agent guest                         # spawn lex-os-guest over stdio
 ```
 
