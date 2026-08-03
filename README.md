@@ -369,7 +369,9 @@ itself depending on either:
   narrowly (`[net, io, proc]`), which would fit the same model if that wiring
   is ever built.
 
-Both are optional, not required — each runs fully without lex-os today.
+Both are optional, not required — each runs fully without lex-os today. See
+[lex-lang's ecosystem model](https://github.com/alpibrusl/lex-lang/blob/main/docs/design/ecosystem-model.md)
+for the full picture across all four repos.
 
 ## The reversibility classification
 
