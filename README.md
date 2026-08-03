@@ -351,6 +351,26 @@ earning signer trust from track record (`lex producer-trust keyring`); and
 promoting the install into a queryable attestation (`lex attest
 import-install`).
 
+## Other Lex products, optionally
+
+lex-os doesn't special-case any consumer — the capsule mechanism above is the
+whole onboarding story for someone else's workload, generic `lex pkg`
+artifacts included. Two sibling repos are shaped to use it without lex-os
+itself depending on either:
+
+- [lex-loom](https://github.com/alpibrusl/lex-loom) (a single company's build
+  loop) declares `lex-os-manifest` and already generates a role-scoped `Grant`
+  per sprint phase (`src/manifests.lex` — e.g. read-only/no-exec for Design,
+  read-write/sandboxed-exec for Build) shaped to hand straight to a manifest
+  here. The grant→capsule wiring itself isn't done — see loom's
+  `docs/design/lex-os-isolation.md` for the design and rollout plan.
+- [lex-soft](https://github.com/alpibrusl/lex-soft) (the cross-org agent mesh)
+  has no lex-os dependency today, but its tools are already effect-scoped
+  narrowly (`[net, io, proc]`), which would fit the same model if that wiring
+  is ever built.
+
+Both are optional, not required — each runs fully without lex-os today.
+
 ## The reversibility classification
 
 Every command is classified by blast radius (`Reversibility` in
