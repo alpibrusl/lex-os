@@ -351,19 +351,44 @@ earning signer trust from track record (`lex producer-trust keyring`); and
 promoting the install into a queryable attestation (`lex attest
 import-install`).
 
+## Mediate one external command (`exec`)
+
+`run`'s agent loop only ever *decides* on a named command — `AgentAction::Run`
+maps straight to the mediation gate and never performs the real OS effect
+(see the `exec` module docs). `capsule install --run` interprets a Lex
+program's `src/main.lex`. Neither fits a caller that already has a real
+external command to execute and just wants it grant-gated: `exec` mediates
+one command through a manifest's grant and, if allowed, actually runs it,
+capturing stdout/stderr/exit code:
+
+```sh
+cargo run -p lex-os -- exec --simulated --manifest qa-manifest.json -- echo hello
+#   qa-manifest.json's exec: None grant → denied before the command ever runs (exit 8)
+cargo run -p lex-os -- exec --simulated --manifest build-manifest.json -- echo hello
+#   build-manifest.json's exec: Sandboxed grant → runs for real, "hello" comes back as stdout
+```
+
+Currently simulated-perimeter only (`--simulated` is required) — same honesty
+as everywhere else: a real grant-gated allow/deny decision and audit trail,
+but not a kernel boundary around what's allowed to run, until the interpreted
+entrypoint gets a real Firecracker rootfs+exec (lex-os#36).
+
 ## Other Lex products, optionally
 
 lex-os doesn't special-case any consumer — the capsule mechanism above is the
 whole onboarding story for someone else's workload, generic `lex pkg`
-artifacts included. Two sibling repos are shaped to use it without lex-os
-itself depending on either:
+artifacts included, and `exec` above is a second, narrower one for a caller
+that just needs one command mediated. Two sibling repos are shaped to use
+this without lex-os itself depending on either:
 
 - [lex-loom](https://github.com/alpibrusl/lex-loom) (a single company's build
-  loop) declares `lex-os-manifest` and already generates a role-scoped `Grant`
-  per sprint phase (`src/manifests.lex` — e.g. read-only/no-exec for Design,
-  read-write/sandboxed-exec for Build) shaped to hand straight to a manifest
-  here. The grant→capsule wiring itself isn't done — see loom's
-  `docs/design/lex-os-isolation.md` for the design and rollout plan.
+  loop) declares `lex-os-manifest` and generates a role-scoped `Grant` per
+  sprint phase (`src/manifests.lex` — e.g. read-only/no-exec for Design,
+  read-write/sandboxed-exec for Build). Its `proc_cmd` executor now routes
+  through `lex-os exec` under that grant when `LEX_OS_ISOLATION` is set
+  (opt-in, off by default) — see loom's `docs/design/lex-os-isolation.md`.
+  Real Firecracker isolation and the rest of loom's executors (LLM, A2A) are
+  still open.
 - [lex-soft](https://github.com/alpibrusl/lex-soft) (the cross-org agent mesh)
   has no lex-os dependency today, but its tools are already effect-scoped
   narrowly (`[net, io, proc]`), which would fit the same model if that wiring

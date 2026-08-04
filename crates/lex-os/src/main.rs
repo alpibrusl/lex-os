@@ -14,6 +14,7 @@
 mod agent;
 mod capsule;
 mod demo;
+mod exec;
 mod inbox;
 
 use std::path::PathBuf;
@@ -31,7 +32,7 @@ use lex_os_perimeter::{Perimeter, SimulatedPerimeter};
 use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
 use lex_os_proto::transport::StreamTransport;
 use lex_os_resolver::{resolve, Environment};
-use lex_os_supervisor::{Limits, Supervisor, SystemClock};
+use lex_os_supervisor::{Decision, Limits, Supervisor, SystemClock};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -227,6 +228,39 @@ enum Cmd {
         #[command(subcommand)]
         what: capsule::CapsuleCmd,
     },
+    /// Mediate one external command through a manifest's grant, then run
+    /// it if allowed. Unlike `run` (a goal-driven agent loop over named,
+    /// symbolic commands) and `capsule install --run` (a Lex program
+    /// entrypoint), this is for a caller that already has a real external
+    /// command to execute and just wants it grant-gated and audited.
+    /// Currently simulated-perimeter only — see `exec` module docs.
+    Exec {
+        /// Manifest JSON whose grant + budget the command is mediated
+        /// against.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Write the resulting audit log here.
+        #[arg(long)]
+        audit_out: Option<PathBuf>,
+        /// Required for now: exec only supports the in-process simulated
+        /// perimeter (NOT a security boundary) until real Firecracker exec
+        /// isolation lands.
+        #[arg(long)]
+        simulated: bool,
+        /// Pretend the host can only do namespace isolation.
+        #[arg(long)]
+        namespaces_only: bool,
+        /// Pretend the host has no outbound network.
+        #[arg(long)]
+        offline: bool,
+        /// Read this file's bytes and pipe them to the command's stdin,
+        /// then close it. Omit to close stdin immediately with no input.
+        #[arg(long)]
+        stdin_file: Option<PathBuf>,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     /// Type-check an agent Lex program against a manifest grant and
     /// refuse it if its effects exceed the grant — the type-check wall
     /// (demo Attempt 1), run *before* the program executes.
@@ -371,6 +405,24 @@ fn main() {
         Cmd::Manifest { what } => cmd_manifest(&fmt, what),
         Cmd::Audit { what } => cmd_audit(&fmt, what),
         Cmd::Capsule { what } => capsule::cmd_capsule(&fmt, what),
+        Cmd::Exec {
+            manifest,
+            audit_out,
+            simulated,
+            namespaces_only,
+            offline,
+            stdin_file,
+            command,
+        } => cmd_exec(
+            &fmt,
+            manifest,
+            audit_out,
+            simulated,
+            namespaces_only,
+            offline,
+            stdin_file,
+            command,
+        ),
         Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
         Cmd::Introspect => cmd_introspect(&fmt),
         #[cfg(feature = "firecracker")]
@@ -1174,6 +1226,104 @@ fn cmd_audit_tail(log: &PathBuf) -> ! {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+// Knobs map 1:1 to CLI flags; a struct would just shuffle the names around.
+#[allow(clippy::too_many_arguments)]
+fn cmd_exec(
+    fmt: &OutputFormat,
+    manifest_path: PathBuf,
+    audit_out: Option<PathBuf>,
+    simulated: bool,
+    namespaces_only: bool,
+    offline: bool,
+    stdin_file: Option<PathBuf>,
+    command: Vec<String>,
+) -> ExitCode {
+    let start = Instant::now();
+
+    // exec has no real Firecracker backend yet (see exec.rs docs) — refuse
+    // rather than let a bare `lex-os exec` be mistaken for a sealed run.
+    if !simulated {
+        return emit_err(
+            fmt,
+            "exec",
+            ExitCode::InvalidArgs,
+            "exec currently requires --simulated; real Firecracker exec isolation \
+             is not implemented yet (lex-os#36 tracks the general in-box case)",
+        );
+    }
+
+    let manifest = match load_manifest(&Some(manifest_path)) {
+        Ok(m) => m,
+        Err(e) => {
+            return emit_err(
+                fmt,
+                "exec",
+                ExitCode::InvalidArgs,
+                &format!("bad manifest: {e}"),
+            )
+        }
+    };
+
+    let stdin_data = match &stdin_file {
+        Some(p) => match std::fs::read(p) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                return emit_err(fmt, "exec", ExitCode::NotFound, &format!("stdin file: {e}"))
+            }
+        },
+        None => None,
+    };
+
+    let env = environment(namespaces_only, offline);
+    let outcome = match exec::run_exec(&manifest, &env, &command, stdin_data.as_deref()) {
+        Ok(o) => o,
+        Err(e) => return emit_err(fmt, "exec", ExitCode::PreconditionFailed, &e.to_string()),
+    };
+
+    if let Some(path) = &audit_out {
+        if let Ok(j) = outcome.audit.to_json() {
+            let _ = std::fs::write(path, j);
+        }
+    }
+
+    match &outcome.decision {
+        Decision::Allowed => {
+            let data = json!({
+                "manifest_id": manifest.content_id().0,
+                "grant": manifest.grant.pretty(),
+                // Same honesty as `run`: a real allow/deny decision, but
+                // not a kernel boundary around what ran. See exec.rs docs.
+                "security_boundary": false,
+                "decision": "allowed",
+                "exit_code": outcome.exit_code,
+                "timed_out": outcome.timed_out,
+                "stdout": outcome.stdout,
+                "stderr": outcome.stderr,
+                "commands_used": outcome.commands_used,
+                "audit_entries": outcome.audit.len(),
+                "audit_head": outcome.audit.head(),
+            });
+            emit(
+                &success_envelope("exec", data, VERSION, Some(start), None),
+                fmt,
+            );
+            ExitCode::Success
+        }
+        Decision::Denied(reason) => emit_err(
+            fmt,
+            "exec",
+            ExitCode::PreconditionFailed,
+            &format!("denied by grant: {reason}"),
+        ),
+        Decision::BudgetExhausted(which) => emit_err(
+            fmt,
+            "exec",
+            ExitCode::PreconditionFailed,
+            &format!("budget exhausted: {which}"),
+        ),
     }
 }
 
