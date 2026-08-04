@@ -82,7 +82,10 @@ pub enum AgentAction {
     /// Request a mediated command by name.
     Run(String),
     /// Request a mediated robot skill with structured arguments.
-    RunSkill { skill: String, args: serde_json::Value },
+    RunSkill {
+        skill: String,
+        args: serde_json::Value,
+    },
     /// Deliberately destroy the box (allowed — it is disposable).
     Destroy(String),
     /// Claim the goal is met (the supervisor still decides to stop).
@@ -91,6 +94,18 @@ pub enum AgentAction {
     /// invariant and logs `NarrowingBlocked` if the child widens the
     /// parent grant — the live narrowing-check wall (design doc §7 Attempt 3).
     ProposeChild(Box<Manifest>),
+    /// Terminal — report the outcome of running a command locally after a
+    /// prior `Run("proc.exec")` was mediated as `Allowed`. Used by the
+    /// `exec` guest script (`lex-os-guest`'s one-shot mode, not the LLM
+    /// loop): the actual command construction and mediation stay exactly
+    /// the generic `Run(name)` path everything else uses; this only carries
+    /// the real process output back once the guest has run it.
+    ExecResult {
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        timed_out: bool,
+    },
 }
 
 /// What the agent sees between actions. The reasoning that produced an
@@ -142,6 +157,16 @@ pub struct Checkpoint {
 pub struct SkillOutcome {
     pub outcome: String,
     pub observation: String,
+}
+
+/// The observed result of an `exec` session's `AgentAction::ExecResult`,
+/// surfaced on `SessionReport` for the caller that dispatched the exec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
 }
 
 /// Why a single mediation decision went the way it did.
@@ -202,6 +227,10 @@ pub struct SessionReport {
     pub audit: AuditLog,
     pub ledger: BudgetLedger,
     pub reprovisions: u32,
+    /// Set when the session ended via `AgentAction::ExecResult` (the `exec`
+    /// guest script's terminal report). `None` for every other agent/session
+    /// shape — most callers can ignore this field entirely.
+    pub exec_result: Option<ExecResult>,
 }
 
 /// The supervisor itself. Generic over the perimeter backend and the
@@ -266,6 +295,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         let mut audit = self.seed_audit.take().unwrap_or_default();
         let mut ledger = BudgetLedger::new(self.manifest.budget, self.clock.now_secs());
         let mut checkpoint = Checkpoint::default();
+        let mut exec_result: Option<ExecResult> = None;
         let mut reprovisions = 0u32;
 
         // Initial provisioning.
@@ -345,6 +375,25 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                     last_outcome = Some("box destroyed; supervisor will reprovision".into());
                     // Next iteration detects the dead box and recovers.
                 }
+                AgentAction::ExecResult {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    timed_out,
+                } => {
+                    audit.append(Event::SessionEnded {
+                        outcome: format!(
+                            "exec_result exit_code={exit_code:?} timed_out={timed_out}"
+                        ),
+                    });
+                    exec_result = Some(ExecResult {
+                        exit_code,
+                        stdout,
+                        stderr,
+                        timed_out,
+                    });
+                    break Outcome::GoalMet;
+                }
                 AgentAction::Run(name) => match self.mediate(&name, &mut audit, &mut ledger) {
                     Decision::Allowed => {
                         checkpoint.completed.push(name.clone());
@@ -360,9 +409,9 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                 AgentAction::RunSkill { skill, args } => {
                     let verdict = match &self.manifest.actuation {
                         Some(act) => skill::mediate_skill(act, &skill, &args),
-                        None => skill::SkillVerdict::Denied(
-                            "manifest has no actuation grant".into(),
-                        ),
+                        None => {
+                            skill::SkillVerdict::Denied("manifest has no actuation grant".into())
+                        }
                     };
                     audit.append(Event::CommandRequested {
                         seq: ledger.commands_used(),
@@ -379,9 +428,15 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                             last_outcome = Some(format!("`{skill}` denied: {reason}"));
                         }
                         skill::SkillVerdict::Allowed => {
-                            let charge = Charge { commands: 1, money_cents: 0, api_calls: 1 };
+                            let charge = Charge {
+                                commands: 1,
+                                money_cents: 0,
+                                api_calls: 1,
+                            };
                             if let Some(which) = ledger.would_exceed(&charge) {
-                                audit.append(Event::BudgetExhausted { which: which.clone() });
+                                audit.append(Event::BudgetExhausted {
+                                    which: which.clone(),
+                                });
                                 agent.execute_skill(&Decision::BudgetExhausted(which.clone()));
                                 break Outcome::BudgetExhausted(which);
                             }
@@ -392,7 +447,9 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                                 api_calls: ledger.api_calls_used(),
                                 elapsed_secs: ledger.elapsed_secs(self.clock.now_secs()),
                             });
-                            audit.append(Event::CommandAllowed { command: skill.clone() });
+                            audit.append(Event::CommandAllowed {
+                                command: skill.clone(),
+                            });
                             match agent.execute_skill(&Decision::Allowed) {
                                 Some(o) => {
                                     audit.append(Event::SkillOutcome {
@@ -404,7 +461,8 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                                     last_outcome = Some(format!("`{skill}` -> {}", o.outcome));
                                 }
                                 None => {
-                                    last_outcome = Some(format!("`{skill}` allowed (no outcome reported)"));
+                                    last_outcome =
+                                        Some(format!("`{skill}` allowed (no outcome reported)"));
                                 }
                             }
                         }
@@ -449,6 +507,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
             audit,
             ledger,
             reprovisions,
+            exec_result,
         })
     }
 
@@ -779,6 +838,52 @@ mod tests {
     }
 
     #[test]
+    fn exec_result_action_ends_the_session_and_is_surfaced_on_the_report() {
+        let m = manifest(
+            Grant::new(Level::ReadOnly, Level::None, Level::Sandboxed),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let mut agent = ScriptedAgent::new(vec![AgentAction::ExecResult {
+            exit_code: Some(0),
+            stdout: "hello\n".into(),
+            stderr: String::new(),
+            timed_out: false,
+        }]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+        assert_eq!(report.outcome, Outcome::GoalMet);
+        let exec = report.exec_result.expect("exec_result must be set");
+        assert_eq!(exec.exit_code, Some(0));
+        assert_eq!(exec.stdout, "hello\n");
+        assert!(!exec.timed_out);
+    }
+
+    #[test]
+    fn non_exec_sessions_leave_exec_result_none() {
+        let m = manifest(
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let mut agent =
+            ScriptedAgent::new(vec![AgentAction::Run("fs.read".into()), AgentAction::Done]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+        assert!(report.exec_result.is_none());
+    }
+
+    #[test]
     fn seed_audit_chains_the_session_onto_an_existing_log() {
         // A caller (e.g. capsule install) already recorded a decision; the
         // session must continue that chain, not start fresh from GENESIS.
@@ -935,29 +1040,47 @@ mod tests {
         Actuation {
             skills: vec!["move_to".into()],
             arm: ActuatorArm {
-                workspace_m: [Range { min: 0.1, max: 0.5 },
-                              Range { min: -0.3, max: 0.3 },
-                              Range { min: 0.0, max: 0.4 }],
+                workspace_m: [
+                    Range { min: 0.1, max: 0.5 },
+                    Range {
+                        min: -0.3,
+                        max: 0.3,
+                    },
+                    Range { min: 0.0, max: 0.4 },
+                ],
                 max_velocity_mps: 0.25,
                 max_force_n: 15.0,
             },
-            gripper: ActuatorGripper { max_grip_force_n: 20.0 },
+            gripper: ActuatorGripper {
+                max_grip_force_n: 20.0,
+            },
             base: None,
         }
     }
 
-    struct SkillScript { step: usize }
+    struct SkillScript {
+        step: usize,
+    }
     impl Agent for SkillScript {
         fn next_action(&mut self, _v: &AgentView) -> AgentAction {
             self.step += 1;
             match self.step {
-                1 => AgentAction::RunSkill { skill: "move_to".into(), args: serde_json::json!({"x":0.3,"y":0.0,"z":0.2}) },
-                2 => AgentAction::RunSkill { skill: "move_to".into(), args: serde_json::json!({"x":0.9,"y":0.0}) },
+                1 => AgentAction::RunSkill {
+                    skill: "move_to".into(),
+                    args: serde_json::json!({"x":0.3,"y":0.0,"z":0.2}),
+                },
+                2 => AgentAction::RunSkill {
+                    skill: "move_to".into(),
+                    args: serde_json::json!({"x":0.9,"y":0.0}),
+                },
                 _ => AgentAction::Done,
             }
         }
         fn execute_skill(&mut self, _decision: &Decision) -> Option<SkillOutcome> {
-            Some(SkillOutcome { outcome: "reached".into(), observation: "{}".into() })
+            Some(SkillOutcome {
+                outcome: "reached".into(),
+                observation: "{}".into(),
+            })
         }
     }
 

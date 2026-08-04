@@ -1,0 +1,17 @@
+{
+  "_comment_exec_manifest": [
+    "Manifest for the REAL in-VM `exec` demo. `exec` overwrites `goal` with the",
+    "actual command spec before dispatch, so the text here is never read — only",
+    "grant/budget/isolation_floor matter. exec: Sandboxed is what lets the",
+    "demo's `echo` actually run inside the box; try exec: None to see the",
+    "denial-before-boot path (the guest still boots, mediates, and reports the",
+    "denial without ever spawning the command)."
+  ],
+  "goal": {
+    "description": "unused — overwritten by the exec spec"
+  },
+  "grant": { "filesystem": "ReadOnly", "network": "None", "exec": "Sandboxed" },
+  "budget": { "wall_clock_secs": 60, "max_commands": 10, "max_money_cents": 0, "max_api_calls": 0 },
+  "isolation_floor": "MicroVm",
+  "egress": []
+}

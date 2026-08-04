@@ -28,7 +28,10 @@ pub enum AgentActionMsg {
     /// supervisor mediates the args against the manifest's actuation block,
     /// replies with a `SkillDecisionMsg`, and (if allowed) awaits a
     /// `SkillOutcomeMsg` after the guest executes the effect.
-    RunSkill { skill: String, args: serde_json::Value },
+    RunSkill {
+        skill: String,
+        args: serde_json::Value,
+    },
     /// Signal goal complete.
     Done,
     /// Intentionally destroy the box.
@@ -37,6 +40,18 @@ pub enum AgentActionMsg {
     /// decide whether to accept). The supervisor always builds the concrete
     /// child manifest on the host side — the guest only signals intent.
     ProposeChild { reason: String },
+    /// Terminal — the outcome of the `exec` guest script running the
+    /// command carried in the session's initial `AgentViewMsg.goal`. Sent
+    /// only after that command was mediated as `proc.exec` (via `Run`) and
+    /// the guest observed the resulting `last_outcome` allow it; the guest
+    /// then runs the command locally (inside the box) and reports back
+    /// instead of looping further.
+    ExecResult {
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        timed_out: bool,
+    },
 }
 
 /// Host → Guest. The supervisor's decision on a `RunSkill`, sent before any
@@ -105,6 +120,47 @@ mod tests {
     }
 
     #[test]
+    fn exec_result_round_trips() {
+        let a = AgentActionMsg::ExecResult {
+            exit_code: Some(0),
+            stdout: "hello\n".into(),
+            stderr: String::new(),
+            timed_out: false,
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("\"action\":\"exec_result\""));
+        let back: AgentActionMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentActionMsg::ExecResult {
+                exit_code: Some(0),
+                timed_out: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exec_result_carries_a_missing_exit_code_on_timeout() {
+        let a = AgentActionMsg::ExecResult {
+            exit_code: None,
+            stdout: "partial".into(),
+            stderr: "".into(),
+            timed_out: true,
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: AgentActionMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            AgentActionMsg::ExecResult {
+                exit_code: None,
+                timed_out: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn run_skill_round_trips() {
         let a = AgentActionMsg::RunSkill {
             skill: "move_to".into(),
@@ -118,12 +174,20 @@ mod tests {
 
     #[test]
     fn decision_and_outcome_round_trip() {
-        let d = SkillDecisionMsg { allowed: false, reason: Some("out of workspace".into()) };
-        let back: SkillDecisionMsg = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        let d = SkillDecisionMsg {
+            allowed: false,
+            reason: Some("out of workspace".into()),
+        };
+        let back: SkillDecisionMsg =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
         assert!(!back.allowed);
 
-        let o = SkillOutcomeMsg { outcome: "reached".into(), observation: "{\"coverage\":0.9}".into() };
-        let back2: SkillOutcomeMsg = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        let o = SkillOutcomeMsg {
+            outcome: "reached".into(),
+            observation: "{\"coverage\":0.9}".into(),
+        };
+        let back2: SkillOutcomeMsg =
+            serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
         assert_eq!(back2.outcome, "reached");
     }
 }

@@ -48,6 +48,10 @@ fn main() -> anyhow::Result<()> {
         return run_reprovision_demo(transport.as_mut());
     }
 
+    if script == "exec" {
+        return run_exec_script(transport.as_mut());
+    }
+
     if script == "robot-demo"
         || script == "robot-violation"
         || script == "xlerobot-demo"
@@ -168,6 +172,160 @@ fn scripted_action(view: &AgentViewMsg) -> AgentActionMsg {
     }
 }
 
+// ── Exec script (lex-os `exec`'s in-VM path) ──────────────────────────────────
+//
+// One-shot, model-free: the host's `exec` driver puts the command to run into
+// this session's `AgentViewMsg.goal` as JSON (there is only ever one view sent
+// before the command either gets mediated-and-run or denied). The command
+// construction and grant check reuse the *existing* generic `Run(name)` path
+// unchanged: this script just requests `Run{command:"proc.exec"}` like any
+// other mediated command, and only after seeing that succeed does it actually
+// run the real payload — locally, i.e. genuinely inside this box, which is
+// what makes this meaningfully different from the host spawning it directly.
+
+#[derive(serde::Deserialize)]
+struct ExecSpec {
+    argv: Vec<String>,
+    #[serde(default)]
+    stdin: Option<String>,
+    wall_clock_secs: u64,
+}
+
+struct LocalExecResult {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    timed_out: bool,
+}
+
+fn run_exec_script(transport: &mut dyn GuestTransport) -> anyhow::Result<()> {
+    let view = transport.recv_view().context("recv view")?;
+    let spec: ExecSpec = match serde_json::from_str(&view.goal) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[guest:exec] goal is not a valid exec spec: {e}");
+            transport
+                .send_action(&AgentActionMsg::Done)
+                .context("send action")?;
+            return Ok(());
+        }
+    };
+    if spec.argv.is_empty() {
+        eprintln!("[guest:exec] exec spec has an empty argv");
+        transport
+            .send_action(&AgentActionMsg::Done)
+            .context("send action")?;
+        return Ok(());
+    }
+
+    // Request mediation through the ordinary Run(name) path — the supervisor's
+    // CommandRegistry either has `proc.exec` registered (host's job) or this
+    // is denied as "no such command", same as any unregistered name.
+    transport
+        .send_action(&AgentActionMsg::Run {
+            command: "proc.exec".into(),
+        })
+        .context("send action")?;
+
+    let decision_view = transport
+        .recv_view()
+        .context("recv view (mediation outcome)")?;
+    let allowed = decision_view
+        .last_outcome
+        .as_deref()
+        .is_some_and(|o| o.starts_with("ran `"));
+    eprintln!(
+        "[guest:exec] mediation outcome: {:?} -> allowed={allowed}",
+        decision_view.last_outcome
+    );
+
+    if !allowed {
+        transport
+            .send_action(&AgentActionMsg::Done)
+            .context("send action")?;
+        return Ok(());
+    }
+
+    let result = execute_locally(&spec);
+    transport
+        .send_action(&AgentActionMsg::ExecResult {
+            exit_code: result.exit_code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            timed_out: result.timed_out,
+        })
+        .context("send action")?;
+    Ok(())
+}
+
+/// Actually run the command, inside this box. `wall_clock_secs` bounds the
+/// whole call the same way the supervisor's own wall-clock gate would.
+fn execute_locally(spec: &ExecSpec) -> LocalExecResult {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let (bin, rest) = spec
+        .argv
+        .split_first()
+        .expect("caller checked argv is non-empty");
+    let mut child = match Command::new(bin)
+        .args(rest)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return LocalExecResult {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("spawn failed: {e}"),
+                timed_out: false,
+            }
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Some(data) = &spec.stdin {
+            use std::io::Write;
+            let _ = stdin.write_all(data.as_bytes());
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(spec.wall_clock_secs.max(1));
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+
+    match child.wait_with_output() {
+        Ok(output) => LocalExecResult {
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            timed_out,
+        },
+        Err(e) => LocalExecResult {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("wait failed: {e}"),
+            timed_out,
+        },
+    }
+}
+
 // ── Transport selection ───────────────────────────────────────────────────────
 
 /// On Linux with `--features vsock`: connect over `AF_VSOCK`.
@@ -277,7 +435,11 @@ fn robot_action(script: &str, view: &AgentViewMsg) -> AgentActionMsg {
     }
 }
 
-fn run_robot(transport: &mut dyn GuestTransport, script: &str, sidecar: &str) -> anyhow::Result<()> {
+fn run_robot(
+    transport: &mut dyn GuestTransport,
+    script: &str,
+    sidecar: &str,
+) -> anyhow::Result<()> {
     use anyhow::Context;
     loop {
         let view = transport.recv_view().context("recv view")?;
@@ -286,8 +448,15 @@ fn run_robot(transport: &mut dyn GuestTransport, script: &str, sidecar: &str) ->
             "[guest:robot] step={} completed={:?} -> {action:?}",
             view.step, view.completed
         );
-        let terminal = matches!(action, AgentActionMsg::Done | AgentActionMsg::Destroy { .. });
-        let pending = if let AgentActionMsg::RunSkill { ref skill, ref args } = action {
+        let terminal = matches!(
+            action,
+            AgentActionMsg::Done | AgentActionMsg::Destroy { .. }
+        );
+        let pending = if let AgentActionMsg::RunSkill {
+            ref skill,
+            ref args,
+        } = action
+        {
             Some((skill.clone(), args.clone()))
         } else {
             None
@@ -303,7 +472,10 @@ fn run_robot(transport: &mut dyn GuestTransport, script: &str, sidecar: &str) ->
                     .unwrap_or_else(|e| format!("{{\"outcome\":\"stalled\",\"detail\":\"{e}\"}}"));
                 let outcome = parse_outcome(&observation);
                 transport
-                    .send_outcome(&lex_os_proto::msg::SkillOutcomeMsg { outcome, observation })
+                    .send_outcome(&lex_os_proto::msg::SkillOutcomeMsg {
+                        outcome,
+                        observation,
+                    })
                     .context("send outcome")?;
             } else {
                 eprintln!("[guest:robot] denied: {:?}", decision.reason);
@@ -318,7 +490,9 @@ fn run_robot(transport: &mut dyn GuestTransport, script: &str, sidecar: &str) ->
 fn call_sidecar(base: &str, skill: &str, args: &Value) -> anyhow::Result<String> {
     use anyhow::Context;
     let url = format!("{base}/skill/{skill}");
-    let resp = ureq::post(&url).send_json(args.clone()).context("sidecar request")?;
+    let resp = ureq::post(&url)
+        .send_json(args.clone())
+        .context("sidecar request")?;
     resp.into_string().context("sidecar body")
 }
 
@@ -327,7 +501,11 @@ fn call_sidecar(base: &str, skill: &str, args: &Value) -> anyhow::Result<String>
 fn parse_outcome(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|v| v.get("outcome").and_then(|o| o.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("outcome")
+                .and_then(|o| o.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "reached".into())
 }
 
@@ -470,6 +648,163 @@ fn parse_action(response: &str) -> Option<AgentActionMsg> {
 mod tests {
     use super::*;
 
+    // ── exec script ────────────────────────────────────────────────────────
+
+    #[test]
+    fn execute_locally_captures_real_stdout_and_exit_code() {
+        let spec = ExecSpec {
+            argv: vec!["echo".into(), "hello".into()],
+            stdin: None,
+            wall_clock_secs: 5,
+        };
+        let out = execute_locally(&spec);
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.stdout.trim(), "hello");
+        assert!(!out.timed_out);
+    }
+
+    #[test]
+    fn execute_locally_pipes_and_closes_stdin() {
+        let spec = ExecSpec {
+            argv: vec!["cat".into()],
+            stdin: Some("piped\n".into()),
+            wall_clock_secs: 5,
+        };
+        let out = execute_locally(&spec);
+        assert_eq!(out.stdout, "piped\n");
+    }
+
+    #[test]
+    fn execute_locally_kills_on_wall_clock_timeout() {
+        let spec = ExecSpec {
+            argv: vec!["sleep".into(), "10".into()],
+            stdin: None,
+            wall_clock_secs: 1,
+        };
+        let out = execute_locally(&spec);
+        assert!(out.timed_out);
+    }
+
+    #[test]
+    fn execute_locally_reports_spawn_failure_without_panicking() {
+        let spec = ExecSpec {
+            argv: vec!["definitely-not-a-real-binary-xyz".into()],
+            stdin: None,
+            wall_clock_secs: 5,
+        };
+        let out = execute_locally(&spec);
+        assert_eq!(out.exit_code, None);
+        assert!(out.stderr.contains("spawn failed"));
+    }
+
+    #[test]
+    fn run_exec_script_denied_sends_done_without_running_anything() {
+        use lex_os_proto::transport::{simulated_pair, Transport};
+
+        let (mut host, mut guest) = simulated_pair();
+        let spec_json = serde_json::to_string(
+            &serde_json::json!({"argv": ["echo", "hi"], "wall_clock_secs": 5}),
+        )
+        .unwrap();
+
+        let handle = std::thread::spawn(move || {
+            host.send_view(&AgentViewMsg {
+                goal: spec_json,
+                step: 0,
+                last_outcome: None,
+                completed: vec![],
+                reprovisions: 0,
+            })
+            .unwrap();
+            // Guest proposes Run("proc.exec"); host plays a denial.
+            let action = host.recv_action().unwrap();
+            assert!(matches!(action, AgentActionMsg::Run { command } if command == "proc.exec"));
+            host.send_view(&AgentViewMsg {
+                goal: "unused".into(),
+                step: 1,
+                last_outcome: Some("`proc.exec` denied: exec not granted".into()),
+                completed: vec![],
+                reprovisions: 0,
+            })
+            .unwrap();
+            host.recv_action().unwrap()
+        });
+
+        run_exec_script(&mut guest).unwrap();
+        let final_action = handle.join().unwrap();
+        assert!(matches!(final_action, AgentActionMsg::Done));
+    }
+
+    #[test]
+    fn run_exec_script_allowed_runs_and_reports_real_output() {
+        use lex_os_proto::transport::{simulated_pair, Transport};
+
+        let (mut host, mut guest) = simulated_pair();
+        let spec_json = serde_json::to_string(
+            &serde_json::json!({"argv": ["echo", "from-guest"], "wall_clock_secs": 5}),
+        )
+        .unwrap();
+
+        let handle = std::thread::spawn(move || {
+            host.send_view(&AgentViewMsg {
+                goal: spec_json,
+                step: 0,
+                last_outcome: None,
+                completed: vec![],
+                reprovisions: 0,
+            })
+            .unwrap();
+            let action = host.recv_action().unwrap();
+            assert!(matches!(action, AgentActionMsg::Run { command } if command == "proc.exec"));
+            host.send_view(&AgentViewMsg {
+                goal: "unused".into(),
+                step: 1,
+                last_outcome: Some("ran `proc.exec`".into()),
+                completed: vec!["proc.exec".into()],
+                reprovisions: 0,
+            })
+            .unwrap();
+            host.recv_action().unwrap()
+        });
+
+        run_exec_script(&mut guest).unwrap();
+        let final_action = handle.join().unwrap();
+        match final_action {
+            AgentActionMsg::ExecResult {
+                exit_code,
+                stdout,
+                timed_out,
+                ..
+            } => {
+                assert_eq!(exit_code, Some(0));
+                assert_eq!(stdout.trim(), "from-guest");
+                assert!(!timed_out);
+            }
+            other => panic!("expected ExecResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_exec_script_bad_spec_sends_done() {
+        use lex_os_proto::transport::{simulated_pair, Transport};
+
+        let (mut host, mut guest) = simulated_pair();
+        let handle = std::thread::spawn(move || {
+            host.send_view(&AgentViewMsg {
+                goal: "not json".into(),
+                step: 0,
+                last_outcome: None,
+                completed: vec![],
+                reprovisions: 0,
+            })
+            .unwrap();
+            host.recv_action().unwrap()
+        });
+
+        run_exec_script(&mut guest).unwrap();
+        assert!(matches!(handle.join().unwrap(), AgentActionMsg::Done));
+    }
+
     #[test]
     fn parses_run() {
         let r = parse_action(r#"{"action":"run","command":"net.fetch"}"#);
@@ -554,7 +889,10 @@ mod tests {
         assert!(matches!(robot_action("robot-demo", &robot_view(1, &[])),
             AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_to"));
         assert!(matches!(
-            robot_action("robot-demo", &robot_view(4, &["move_to", "grasp", "run_policy"])),
+            robot_action(
+                "robot-demo",
+                &robot_view(4, &["move_to", "grasp", "run_policy"])
+            ),
             AgentActionMsg::Done
         ));
     }
@@ -563,10 +901,15 @@ mod tests {
     fn xlerobot_demo_runs_base_then_arm_then_grasp() {
         assert!(matches!(robot_action("xlerobot-demo", &robot_view(0, &[])),
             AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_base"));
-        assert!(matches!(robot_action("xlerobot-demo", &robot_view(1, &["move_base"])),
-            AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_arm"));
+        assert!(
+            matches!(robot_action("xlerobot-demo", &robot_view(1, &["move_base"])),
+            AgentActionMsg::RunSkill { ref skill, .. } if skill == "move_arm")
+        );
         assert!(matches!(
-            robot_action("xlerobot-demo", &robot_view(3, &["move_base", "move_arm", "grasp_arm"])),
+            robot_action(
+                "xlerobot-demo",
+                &robot_view(3, &["move_base", "move_arm", "grasp_arm"])
+            ),
             AgentActionMsg::Done
         ));
     }
@@ -606,7 +949,10 @@ mod tests {
 
     #[test]
     fn parse_outcome_extracts_field() {
-        assert_eq!(parse_outcome(r#"{"outcome":"reached","coverage":0.9}"#), "reached");
+        assert_eq!(
+            parse_outcome(r#"{"outcome":"reached","coverage":0.9}"#),
+            "reached"
+        );
         assert_eq!(parse_outcome("not json"), "reached");
         assert_eq!(parse_outcome(r#"{"status":"ok"}"#), "reached");
     }
