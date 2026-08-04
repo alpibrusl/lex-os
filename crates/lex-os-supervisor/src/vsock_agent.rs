@@ -86,14 +86,21 @@ impl<T: Transport> Agent for VsockAgent<T> {
             crate::Decision::Denied(r) => (false, Some(r.clone())),
             crate::Decision::BudgetExhausted(r) => (false, Some(r.clone())),
         };
-        if self.transport.send_decision(&SkillDecisionMsg { allowed, reason }).is_err() {
+        if self
+            .transport
+            .send_decision(&SkillDecisionMsg { allowed, reason })
+            .is_err()
+        {
             return None;
         }
         if !allowed {
             return None; // guest will not execute; nothing to await
         }
         match self.transport.recv_outcome() {
-            Ok(o) => Some(crate::SkillOutcome { outcome: o.outcome, observation: o.observation }),
+            Ok(o) => Some(crate::SkillOutcome {
+                outcome: o.outcome,
+                observation: o.observation,
+            }),
             Err(_) => None,
         }
     }
@@ -115,6 +122,17 @@ fn convert(msg: AgentActionMsg, _parent: &Manifest) -> AgentAction {
         AgentActionMsg::RunSkill { skill, args } => AgentAction::RunSkill { skill, args },
         AgentActionMsg::Done => AgentAction::Done,
         AgentActionMsg::Destroy { reason } => AgentAction::Destroy(reason),
+        AgentActionMsg::ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+            timed_out,
+        } => AgentAction::ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+            timed_out,
+        },
         AgentActionMsg::ProposeChild { .. } => {
             // Build the concrete widening attempt on the host side.
             // The narrowing wall will block this — that is the point.
@@ -215,6 +233,35 @@ mod tests {
     }
 
     #[test]
+    fn proxies_exec_result_action() {
+        let (host_transport, mut guest) = simulated_pair();
+        let mut agent = VsockAgent::new(host_transport, parent());
+
+        let handle = std::thread::spawn(move || {
+            guest.recv_view().unwrap();
+            guest
+                .send_action(&AgentActionMsg::ExecResult {
+                    exit_code: Some(0),
+                    stdout: "hi\n".into(),
+                    stderr: String::new(),
+                    timed_out: false,
+                })
+                .unwrap();
+        });
+
+        let action = agent.next_action(&make_view(0));
+        handle.join().unwrap();
+        assert!(matches!(
+            action,
+            AgentAction::ExecResult {
+                exit_code: Some(0),
+                timed_out: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn propose_child_widens_grant() {
         let (host_transport, mut guest) = simulated_pair();
         let mut agent = VsockAgent::new(host_transport, parent());
@@ -303,9 +350,9 @@ mod tests {
 
     #[test]
     fn execute_skill_relays_decision_and_returns_outcome() {
-        use lex_os_proto::transport::{simulated_pair, GuestTransport};
-        use lex_os_proto::msg::{SkillDecisionMsg, SkillOutcomeMsg};
         use crate::{Agent, Decision};
+        use lex_os_proto::msg::{SkillDecisionMsg, SkillOutcomeMsg};
+        use lex_os_proto::transport::{simulated_pair, GuestTransport};
 
         let (host, mut guest) = simulated_pair();
         let mut agent = VsockAgent::new(host, parent());
@@ -314,9 +361,12 @@ mod tests {
         let guest_thread = std::thread::spawn(move || {
             let d: SkillDecisionMsg = guest.recv_decision().unwrap();
             assert!(d.allowed);
-            guest.send_outcome(&SkillOutcomeMsg {
-                outcome: "reached".into(), observation: "{\"coverage\":0.9}".into(),
-            }).unwrap();
+            guest
+                .send_outcome(&SkillOutcomeMsg {
+                    outcome: "reached".into(),
+                    observation: "{\"coverage\":0.9}".into(),
+                })
+                .unwrap();
         });
 
         let out = agent.execute_skill(&Decision::Allowed).unwrap();

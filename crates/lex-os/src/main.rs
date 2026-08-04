@@ -27,12 +27,12 @@ use serde_json::json;
 
 use lex_os_audit::AuditLog;
 use lex_os_manifest::Manifest;
-use lex_os_perimeter::{Perimeter, SimulatedPerimeter};
 #[cfg(feature = "firecracker")]
 use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
+use lex_os_perimeter::{Perimeter, SimulatedPerimeter};
 use lex_os_proto::transport::StreamTransport;
 use lex_os_resolver::{resolve, Environment};
-use lex_os_supervisor::{Decision, Limits, Supervisor, SystemClock};
+use lex_os_supervisor::{Limits, Supervisor, SystemClock};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -77,10 +77,12 @@ fn select_backend(simulated_flag: bool) -> Result<Backend, String> {
         if std::path::Path::new("/dev/kvm").exists() {
             Ok(Backend::Real)
         } else {
-            Err("the real microVM perimeter is unavailable: no /dev/kvm on this host. \
+            Err(
+                "the real microVM perimeter is unavailable: no /dev/kvm on this host. \
                  Re-run with --simulated to use the in-process simulator (NOT a security \
                  boundary), or run on a KVM host."
-                .into())
+                    .into(),
+            )
         }
     }
     #[cfg(not(feature = "firecracker"))]
@@ -229,11 +231,12 @@ enum Cmd {
         what: capsule::CapsuleCmd,
     },
     /// Mediate one external command through a manifest's grant, then run
-    /// it if allowed. Unlike `run` (a goal-driven agent loop over named,
-    /// symbolic commands) and `capsule install --run` (a Lex program
-    /// entrypoint), this is for a caller that already has a real external
-    /// command to execute and just wants it grant-gated and audited.
-    /// Currently simulated-perimeter only — see `exec` module docs.
+    /// it — for real, inside a booted box — if allowed. Unlike `run` (a
+    /// goal-driven agent loop over named, symbolic commands) and `capsule
+    /// install --run` (a Lex program entrypoint), this is for a caller that
+    /// already has a real external command to execute and just wants it
+    /// grant-gated and audited. Same backend selection as `run`: the real
+    /// microVM by default, `--simulated` an explicit opt-in.
     Exec {
         /// Manifest JSON whose grant + budget the command is mediated
         /// against.
@@ -242,11 +245,6 @@ enum Cmd {
         /// Write the resulting audit log here.
         #[arg(long)]
         audit_out: Option<PathBuf>,
-        /// Required for now: exec only supports the in-process simulated
-        /// perimeter (NOT a security boundary) until real Firecracker exec
-        /// isolation lands.
-        #[arg(long)]
-        simulated: bool,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -257,6 +255,18 @@ enum Cmd {
         /// then close it. Omit to close stdin immediately with no input.
         #[arg(long)]
         stdin_file: Option<PathBuf>,
+        /// Use the in-process simulated perimeter instead of a real
+        /// microVM. NOT a security boundary — for portability/tests/dev.
+        /// Without it, a non-KVM host refuses rather than silently
+        /// downgrading, same as `run`.
+        #[arg(long)]
+        simulated: bool,
+        /// Path to lex-os-guest binary for the simulated backend (default:
+        /// next to this exe).
+        #[arg(long)]
+        guest_bin: Option<PathBuf>,
+        #[command(flatten)]
+        jail: JailArgs,
         /// The command and its arguments, after `--`.
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -408,19 +418,23 @@ fn main() {
         Cmd::Exec {
             manifest,
             audit_out,
-            simulated,
             namespaces_only,
             offline,
             stdin_file,
+            simulated,
+            guest_bin,
+            jail,
             command,
         } => cmd_exec(
             &fmt,
             manifest,
             audit_out,
-            simulated,
             namespaces_only,
             offline,
             stdin_file,
+            simulated,
+            guest_bin,
+            jail,
             command,
         ),
         Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
@@ -952,6 +966,109 @@ fn run_guest_subprocess(
     Ok(report)
 }
 
+/// `exec`'s real backend: boot a microVM whose init runs `lex-os-guest` with
+/// `guest_script=exec`, drive it through the *ordinary* `Supervisor` +
+/// `VsockAgent` loop (unchanged — the same one `run --agent guest` uses),
+/// then return the `SessionReport` for `exec::interpret` to read. Mirrors
+/// `run_guest_in_vm` closely, minus the Ollama wiring exec's script never
+/// touches, and with `exec::registry()` in place of `demo::demo_registry()`
+/// so `proc.exec` actually exists to mediate.
+#[cfg(feature = "firecracker")]
+fn run_exec_in_vm(
+    manifest: Manifest,
+    env: &lex_os_resolver::Environment,
+    jail: Option<lex_os_perimeter::JailConfig>,
+) -> anyhow::Result<lex_os_supervisor::SessionReport> {
+    use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
+    use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
+
+    let assets = FirecrackerAssets {
+        boot_args: format!(
+            "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.agent guest_script={}",
+            exec::GUEST_SCRIPT
+        ),
+        jail: jail.clone(),
+        ..FirecrackerAssets::default()
+    };
+
+    let perimeter = FirecrackerPerimeter::with_assets(assets);
+    let vsock_base = perimeter
+        .vsock_host_path()
+        .ok_or_else(|| anyhow::anyhow!("vsock not configured for the in-VM exec guest"))?;
+
+    // One-shot: propose Run("proc.exec"), see the decision, run, report. A
+    // handful of steps of headroom is plenty; this is not an open-ended loop.
+    let limits = Limits {
+        max_steps: 8,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(
+        manifest.clone(),
+        exec::registry(),
+        perimeter,
+        SystemClock,
+        limits,
+    );
+    let transport = LazyVsockTransport::new(vsock_base);
+    let mut agent = VsockAgent::new(transport, manifest);
+    supervisor.run(env, &mut agent).map_err(Into::into)
+}
+
+/// `exec`'s simulated backend: spawn `lex-os-guest` as a subprocess with
+/// `LEX_OS_GUEST_SCRIPT=exec` and drive it over its stdin/stdout, same
+/// protocol as the real vsock channel. Mirrors `run_guest_subprocess`.
+fn run_exec_subprocess(
+    manifest: Manifest,
+    env: &lex_os_resolver::Environment,
+    guest_bin: Option<PathBuf>,
+) -> anyhow::Result<lex_os_supervisor::SessionReport> {
+    use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
+    use std::io::BufReader;
+    use std::process::{Command, Stdio};
+
+    let bin = match guest_bin {
+        Some(p) => p,
+        None => {
+            let mut p = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lex-os"));
+            p.set_file_name("lex-os-guest");
+            if !p.exists() {
+                PathBuf::from("lex-os-guest")
+            } else {
+                p
+            }
+        }
+    };
+
+    let mut child = Command::new(&bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .env("LEX_OS_GUEST_SCRIPT", exec::GUEST_SCRIPT)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("could not spawn {}: {e}", bin.display()))?;
+
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let transport = StreamTransport::new(BufReader::new(stdout), stdin);
+
+    let limits = Limits {
+        max_steps: 8,
+        ..Limits::default()
+    };
+    let supervisor = Supervisor::new(
+        manifest.clone(),
+        exec::registry(),
+        SimulatedPerimeter::new(),
+        SystemClock,
+        limits,
+    );
+    let mut agent = VsockAgent::new(transport, manifest);
+    let report = supervisor.run(env, &mut agent)?;
+
+    let _ = child.wait();
+    Ok(report)
+}
+
 /// Standalone Wall-2 proof. Provision a real microVM (which installs the
 /// host-side egress wall on the tap), dwell so the guest boots and runs
 /// `/sbin/init.demo` — its console (incl. the `8.8.8.8 -> blocked` probe)
@@ -981,7 +1098,11 @@ fn cmd_box_smoke(
     let jail_cfg = jail.to_config();
     eprintln!(
         "box-smoke: provisioning {} microVM; egress allowlist = {:?}",
-        if jail_cfg.is_some() { "JAILED" } else { "UNJAILED (root)" },
+        if jail_cfg.is_some() {
+            "JAILED"
+        } else {
+            "UNJAILED (root)"
+        },
         policy.egress
     );
 
@@ -1235,25 +1356,22 @@ fn cmd_exec(
     fmt: &OutputFormat,
     manifest_path: PathBuf,
     audit_out: Option<PathBuf>,
-    simulated: bool,
     namespaces_only: bool,
     offline: bool,
     stdin_file: Option<PathBuf>,
+    simulated: bool,
+    guest_bin: Option<PathBuf>,
+    jail: JailArgs,
     command: Vec<String>,
 ) -> ExitCode {
+    let _ = &jail; // consumed only by the firecracker path below
     let start = Instant::now();
 
-    // exec has no real Firecracker backend yet (see exec.rs docs) — refuse
-    // rather than let a bare `lex-os exec` be mistaken for a sealed run.
-    if !simulated {
-        return emit_err(
-            fmt,
-            "exec",
-            ExitCode::InvalidArgs,
-            "exec currently requires --simulated; real Firecracker exec isolation \
-             is not implemented yet (lex-os#36 tracks the general in-box case)",
-        );
-    }
+    let backend = match select_backend(simulated) {
+        Ok(b) => b,
+        Err(e) => return emit_err(fmt, "exec", ExitCode::PreconditionFailed, &e),
+    };
+    warn_if_not_sealed(backend);
 
     let manifest = match load_manifest(&Some(manifest_path)) {
         Ok(m) => m,
@@ -1268,8 +1386,8 @@ fn cmd_exec(
     };
 
     let stdin_data = match &stdin_file {
-        Some(p) => match std::fs::read(p) {
-            Ok(bytes) => Some(bytes),
+        Some(p) => match std::fs::read_to_string(p) {
+            Ok(s) => Some(s),
             Err(e) => {
                 return emit_err(fmt, "exec", ExitCode::NotFound, &format!("stdin file: {e}"))
             }
@@ -1277,34 +1395,56 @@ fn cmd_exec(
         None => None,
     };
 
+    // The exec spec — argv, stdin, timeout — travels to the guest as the
+    // session's goal; everything else about the manifest (grant, budget,
+    // egress) is unchanged, so mediation still sees the real declared grant.
+    let spec = exec::ExecSpec {
+        argv: &command,
+        stdin: stdin_data.as_deref(),
+        wall_clock_secs: manifest.budget.wall_clock_secs,
+    };
+    let mut exec_manifest = manifest.clone();
+    exec_manifest.goal = lex_os_manifest::Goal::new(spec.goal_json());
+
     let env = environment(namespaces_only, offline);
-    let outcome = match exec::run_exec(&manifest, &env, &command, stdin_data.as_deref()) {
-        Ok(o) => o,
+    let report = match backend {
+        Backend::Simulated => run_exec_subprocess(exec_manifest, &env, guest_bin),
+        #[cfg(feature = "firecracker")]
+        Backend::Real => run_exec_in_vm(exec_manifest, &env, jail.to_config()),
+        #[cfg(not(feature = "firecracker"))]
+        Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
+    };
+    let report = match report {
+        Ok(r) => r,
         Err(e) => return emit_err(fmt, "exec", ExitCode::PreconditionFailed, &e.to_string()),
     };
 
     if let Some(path) = &audit_out {
-        if let Ok(j) = outcome.audit.to_json() {
+        if let Ok(j) = report.audit.to_json() {
             let _ = std::fs::write(path, j);
         }
     }
 
-    match &outcome.decision {
-        Decision::Allowed => {
+    match exec::interpret(&report) {
+        exec::Outcome::Allowed {
+            exit_code,
+            stdout,
+            stderr,
+            timed_out,
+        } => {
             let data = json!({
                 "manifest_id": manifest.content_id().0,
                 "grant": manifest.grant.pretty(),
-                // Same honesty as `run`: a real allow/deny decision, but
-                // not a kernel boundary around what ran. See exec.rs docs.
-                "security_boundary": false,
+                "perimeter": backend.name(),
+                "security_boundary": backend.is_security_boundary(),
                 "decision": "allowed",
-                "exit_code": outcome.exit_code,
-                "timed_out": outcome.timed_out,
-                "stdout": outcome.stdout,
-                "stderr": outcome.stderr,
-                "commands_used": outcome.commands_used,
-                "audit_entries": outcome.audit.len(),
-                "audit_head": outcome.audit.head(),
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "stdout": stdout,
+                "stderr": stderr,
+                "commands_used": report.ledger.commands_used(),
+                "audit_entries": report.audit.len(),
+                "audit_head": report.audit.head(),
             });
             emit(
                 &success_envelope("exec", data, VERSION, Some(start), None),
@@ -1312,18 +1452,15 @@ fn cmd_exec(
             );
             ExitCode::Success
         }
-        Decision::Denied(reason) => emit_err(
+        exec::Outcome::Denied(reason) => emit_err(
             fmt,
             "exec",
             ExitCode::PreconditionFailed,
             &format!("denied by grant: {reason}"),
         ),
-        Decision::BudgetExhausted(which) => emit_err(
-            fmt,
-            "exec",
-            ExitCode::PreconditionFailed,
-            &format!("budget exhausted: {which}"),
-        ),
+        exec::Outcome::ProtocolFailure(reason) => {
+            emit_err(fmt, "exec", ExitCode::GeneralError, &reason)
+        }
     }
 }
 

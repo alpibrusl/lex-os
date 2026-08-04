@@ -12,7 +12,7 @@ Commands:
   manifest    Manifest utilities
   audit       Audit-log utilities
   capsule     Capability-addressed distribution (lex-os#34): sign an artifact to the grant it requires, and install it by narrowing a consumer's manifest — refuse, don't downgrade
-  exec        Mediate one external command through a manifest's grant, then run it if allowed. Unlike `run` (a goal-driven agent loop over named, symbolic commands) and `capsule install --run` (a Lex program entrypoint), this is for a caller that already has a real external command to execute and just wants it grant-gated and audited. Currently simulated-perimeter only — see `exec` module docs
+  exec        Mediate one external command through a manifest's grant, then run it — for real, inside a booted box — if allowed. Unlike `run` (a goal-driven agent loop over named, symbolic commands) and `capsule install --run` (a Lex program entrypoint), this is for a caller that already has a real external command to execute and just wants it grant-gated and audited. Same backend selection as `run`: the real microVM by default, `--simulated` an explicit opt-in
   check       Type-check an agent Lex program against a manifest grant and refuse it if its effects exceed the grant — the type-check wall (demo Attempt 1), run *before* the program executes
   introspect  Emit the acli command tree for agent discovery
   box-smoke   Standalone Wall-2 proof: boot a real Firecracker microVM with the host-side egress wall, dwell while the guest boots and runs `/sbin/init.demo` (the egress probes), then tear it down. Streams the guest console. Requires `--features firecracker`, a KVM host, and root

@@ -19,6 +19,7 @@ vsock = ["lex-os-proto/vsock"]
 
 [dependencies]
 lex-os-proto = { path = "../lex-os-proto" }
+serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 # The guest only talks plain HTTP to Ollama, so drop ureq's TLS backend

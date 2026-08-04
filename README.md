@@ -358,8 +358,8 @@ maps straight to the mediation gate and never performs the real OS effect
 (see the `exec` module docs). `capsule install --run` interprets a Lex
 program's `src/main.lex`. Neither fits a caller that already has a real
 external command to execute and just wants it grant-gated: `exec` mediates
-one command through a manifest's grant and, if allowed, actually runs it,
-capturing stdout/stderr/exit code:
+one command through a manifest's grant and, if allowed, actually runs it —
+for real, inside a booted box — capturing stdout/stderr/exit code:
 
 ```sh
 cargo run -p lex-os -- exec --simulated --manifest qa-manifest.json -- echo hello
@@ -368,10 +368,20 @@ cargo run -p lex-os -- exec --simulated --manifest build-manifest.json -- echo h
 #   build-manifest.json's exec: Sandboxed grant → runs for real, "hello" comes back as stdout
 ```
 
-Currently simulated-perimeter only (`--simulated` is required) — same honesty
-as everywhere else: a real grant-gated allow/deny decision and audit trail,
-but not a kernel boundary around what's allowed to run, until the interpreted
-entrypoint gets a real Firecracker rootfs+exec (lex-os#36).
+Same backend selection as `run`: the real Firecracker microVM by default on a
+KVM host, `--simulated` an explicit opt-in. Either way the *mechanism* is
+identical, not a swapped-out `Perimeter` impl standing in for the real thing —
+`exec` boots `lex-os-guest` in its one-shot `exec` script mode (skips the LLM
+loop entirely), which mediates `proc.exec` through the ordinary `Run(name)`
+path and, only once that's `Allowed`, actually runs the command **inside the
+box** and reports the real output back over the same channel `--agent guest`
+uses. Under `--simulated` that box is a subprocess (same honesty as
+everywhere else: a real grant-gated decision, but no kernel boundary around
+what runs); under the real backend it's a genuine microVM, so the command is
+kernel-isolated the same way an in-VM `--agent guest` session already is.
+`bash demo/exec-in-vm.sh` (KVM host) proves the real path end-to-end; the
+simulated path is exercised by `crates/lex-os/src/exec.rs`'s and
+`crates/lex-os-guest`'s own test suites, which run anywhere.
 
 ## Other Lex products, optionally
 
@@ -387,8 +397,10 @@ this without lex-os itself depending on either:
   read-write/sandboxed-exec for Build). Its `proc_cmd` executor now routes
   through `lex-os exec` under that grant when `LEX_OS_ISOLATION` is set
   (opt-in, off by default) — see loom's `docs/design/lex-os-isolation.md`.
-  Real Firecracker isolation and the rest of loom's executors (LLM, A2A) are
-  still open.
+  `exec` itself supports the real Firecracker backend the same way `run`
+  does; loom's own CI doesn't install the `lex-os` binary yet, so today it
+  only exercises the simulated path — the rest of loom's executors (LLM,
+  A2A) are still unmediated.
 - [lex-soft](https://github.com/alpibrusl/lex-soft) (the cross-org agent mesh)
   has no lex-os dependency today, but its tools are already effect-scoped
   narrowly (`[net, io, proc]`), which would fit the same model if that wiring
