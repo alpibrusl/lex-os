@@ -607,15 +607,28 @@ mod tests {
         let with_act = Manifest {
             actuation: Some(Actuation {
                 skills: vec!["move_to".into()],
-                arm: ActuatorArm {
-                    workspace_m: [Range { min: 0.1, max: 0.5 },
-                                  Range { min: -0.3, max: 0.3 },
-                                  Range { min: 0.0, max: 0.4 }],
-                    max_velocity_mps: 0.25,
-                    max_force_n: 15.0,
-                },
-                gripper: ActuatorGripper { max_grip_force_n: 20.0 },
-                base: None,
+                arms: std::collections::BTreeMap::from([(
+                    "arm".to_string(),
+                    ActuatorArm {
+                        workspace_m: [
+                            Range { min: 0.1, max: 0.5 },
+                            Range {
+                                min: -0.3,
+                                max: 0.3,
+                            },
+                            Range { min: 0.0, max: 0.4 },
+                        ],
+                        max_velocity_mps: 0.25,
+                        max_force_n: 15.0,
+                    },
+                )]),
+                grippers: std::collections::BTreeMap::from([(
+                    "gripper".to_string(),
+                    ActuatorGripper {
+                        max_grip_force_n: 20.0,
+                    },
+                )]),
+                bases: std::collections::BTreeMap::new(),
             }),
             ..plain.clone()
         };
