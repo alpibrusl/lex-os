@@ -36,6 +36,11 @@ const UNBOUNDED_BY_DESIGN: &[&str] = &[
     "read_camera",
     "listen",
     "speak",
+    "show_image",
+    "show_video",
+    "show_url",
+    "show_text",
+    "clear_display",
     "read_base",
     "locate_object",
     "transform_to_arm",
@@ -408,6 +413,39 @@ mod tests {
         a.skills.push("speak".into());
         assert_eq!(
             mediate_skill(&a, "speak", &json!({"text":"cup located"})),
+            SkillVerdict::Allowed
+        );
+        a.skills.push("show_image".into());
+        assert_eq!(
+            mediate_skill(
+                &a,
+                "show_image",
+                &json!({"source":"https://example.com/cup.jpg"})
+            ),
+            SkillVerdict::Allowed
+        );
+        a.skills.push("show_video".into());
+        assert_eq!(
+            mediate_skill(
+                &a,
+                "show_video",
+                &json!({"source":"https://example.com/clip.mp4"})
+            ),
+            SkillVerdict::Allowed
+        );
+        a.skills.push("show_url".into());
+        assert_eq!(
+            mediate_skill(&a, "show_url", &json!({"url":"https://example.com"})),
+            SkillVerdict::Allowed
+        );
+        a.skills.push("show_text".into());
+        assert_eq!(
+            mediate_skill(&a, "show_text", &json!({"text":"status: idle"})),
+            SkillVerdict::Allowed
+        );
+        a.skills.push("clear_display".into());
+        assert_eq!(
+            mediate_skill(&a, "clear_display", &json!({})),
             SkillVerdict::Allowed
         );
     }
