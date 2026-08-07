@@ -37,6 +37,7 @@ const UNBOUNDED_BY_DESIGN: &[&str] = &[
     "listen",
     "read_base",
     "locate_object",
+    "transform_to_arm",
     "read_inlet",
     "workpiece_status",
     "reset",
@@ -396,6 +397,11 @@ mod tests {
         a.skills.push("locate_object".into());
         assert_eq!(
             mediate_skill(&a, "locate_object", &json!({"name":"cup"})),
+            SkillVerdict::Allowed
+        );
+        a.skills.push("transform_to_arm".into());
+        assert_eq!(
+            mediate_skill(&a, "transform_to_arm", &json!({"x":0.3,"y":0.1,"z":0.2})),
             SkillVerdict::Allowed
         );
     }
