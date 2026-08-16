@@ -154,6 +154,78 @@ pub enum PerimeterError {
     Blocked(String),
 }
 
+/// The raw material of one in-box execution, as the supervisor observed
+/// it — exit code (None: the process never produced one), the stderr
+/// tail, and whether the run timed out. Handed to the backend for
+/// classification; the backend, not the caller, owns the mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecObservation {
+    pub exit_code: Option<i32>,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// The classified outcome of one in-box execution (#61): a closed, shared
+/// vocabulary so the audit log can distinguish "the perimeter denied X"
+/// from "X never launched" from "X ran and exited". The classification
+/// ORDER is part of the contract and every backend must honor it:
+/// timeout first, then runner-failure evidence (the command never ran —
+/// checked BEFORE denial signatures, because a stderr that happens to
+/// contain denial-looking text proves nothing if the process never
+/// started), then the backend's OWN denial dialect, then a plain guest
+/// exit. A backend maps only failure shapes it genuinely produces; a
+/// cross-backend union would claim denials a given backend never emits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecClass {
+    /// The kernel wall refused the effect; `rule` is the matched
+    /// backend-dialect signature.
+    DeniedByPerimeter { rule: String },
+    /// The command never ran (spawn failure, missing binary, dead box).
+    /// An error, never a silent retry-with-less.
+    LaunchFailure { cause: String },
+    /// The run hit the supervisor's deadline.
+    TimedOut,
+    /// The command ran inside the box and exited with `code` (0 included
+    /// — success is just the happy arm of the same fact).
+    ExitedInGuest { code: i32 },
+}
+
+impl ExecClass {
+    /// Stable audit-log label, identical across backends.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ExecClass::DeniedByPerimeter { .. } => "denied_by_perimeter",
+            ExecClass::LaunchFailure { .. } => "launch_failure",
+            ExecClass::TimedOut => "timed_out",
+            ExecClass::ExitedInGuest { .. } => "exited_in_guest",
+        }
+    }
+
+    /// Shared classification skeleton: the order contract, parameterized
+    /// by the backend's own denial dialect. Backends call this with the
+    /// signatures they genuinely produce.
+    pub fn classify_with_dialect(obs: &ExecObservation, dialect: &[&str]) -> ExecClass {
+        if obs.timed_out {
+            return ExecClass::TimedOut;
+        }
+        let Some(code) = obs.exit_code else {
+            return ExecClass::LaunchFailure {
+                cause: "no exit code — the command never completed a spawn".to_string(),
+            };
+        };
+        if code != 0 {
+            for sig in dialect {
+                if obs.stderr.contains(sig) {
+                    return ExecClass::DeniedByPerimeter {
+                        rule: (*sig).to_string(),
+                    };
+                }
+            }
+        }
+        ExecClass::ExitedInGuest { code }
+    }
+}
+
 /// A handle to a provisioned, policy-enforcing box.
 pub trait Perimeter {
     /// A human-readable name for the backend (for logs/audit).
@@ -177,6 +249,10 @@ pub trait Perimeter {
     /// Simulate the box destroying itself (allowed and even useful, as
     /// long as the box is isolated — design doc §4).
     fn destroy(&mut self, reason: &str);
+
+    /// Classify one execution observation into the closed [`ExecClass`]
+    /// vocabulary, using this backend's OWN denial dialect (#61).
+    fn classify_exec(&self, obs: &ExecObservation) -> ExecClass;
 }
 
 /// Forward `Perimeter` through a `Box`, so the binary can pick the backend at
@@ -198,6 +274,9 @@ impl<P: Perimeter + ?Sized> Perimeter for Box<P> {
     }
     fn check(&self, dim: Dimension, required: Level) -> Result<(), PerimeterError> {
         (**self).check(dim, required)
+    }
+    fn classify_exec(&self, obs: &ExecObservation) -> ExecClass {
+        (**self).classify_exec(obs)
     }
     fn destroy(&mut self, reason: &str) {
         (**self).destroy(reason)
@@ -295,6 +374,15 @@ impl Perimeter for SimulatedPerimeter {
     fn destroy(&mut self, _reason: &str) {
         self.state = BoxState::Dead;
     }
+
+    /// The simulator's denial dialect is exactly one marker, emitted only
+    /// by the simulator itself — it deliberately does NOT include kernel
+    /// strings like "Permission denied", because the simulator never
+    /// produces them and claiming them would misattribute ordinary guest
+    /// failures to the (non-)boundary.
+    fn classify_exec(&self, obs: &ExecObservation) -> ExecClass {
+        ExecClass::classify_with_dialect(obs, &["[sim-denied:"])
+    }
 }
 
 #[cfg(test)]
@@ -382,5 +470,77 @@ mod tests {
         assert!(policy.permits_host("results.demo.internal"));
         // A host not in the list is refused.
         assert!(!policy.permits_host("evil.com"));
+    }
+}
+
+#[cfg(test)]
+mod exec_class_tests {
+    use super::*;
+
+    fn obs(exit_code: Option<i32>, stderr: &str, timed_out: bool) -> ExecObservation {
+        ExecObservation {
+            exit_code,
+            stderr: stderr.to_string(),
+            timed_out,
+        }
+    }
+
+    #[test]
+    fn runner_failure_evidence_is_checked_before_denial_signatures() {
+        // stderr containing denial-looking text proves nothing if the
+        // process never produced an exit code: launch failure wins.
+        let sim = SimulatedPerimeter::new();
+        let c = sim.classify_exec(&obs(None, "[sim-denied: fs] Permission denied", false));
+        assert!(matches!(c, ExecClass::LaunchFailure { .. }));
+    }
+
+    #[test]
+    fn timeout_wins_over_everything() {
+        let sim = SimulatedPerimeter::new();
+        let c = sim.classify_exec(&obs(Some(1), "[sim-denied: net]", true));
+        assert_eq!(c, ExecClass::TimedOut);
+    }
+
+    #[test]
+    fn simulator_dialect_is_the_sim_marker_only() {
+        let sim = SimulatedPerimeter::new();
+        // Its own marker classifies as a perimeter denial…
+        let denied = sim.classify_exec(&obs(Some(1), "[sim-denied: net egress]", false));
+        assert!(matches!(denied, ExecClass::DeniedByPerimeter { .. }));
+        // …but kernel strings the simulator never produces do NOT — the
+        // simulator claiming a kernel denial would misattribute an
+        // ordinary guest failure to a boundary that was not involved.
+        let kernelish = sim.classify_exec(&obs(Some(1), "sh: /x: Permission denied", false));
+        assert_eq!(kernelish, ExecClass::ExitedInGuest { code: 1 });
+    }
+
+    #[test]
+    fn success_and_plain_failure_are_guest_exits() {
+        let sim = SimulatedPerimeter::new();
+        assert_eq!(
+            sim.classify_exec(&obs(Some(0), "", false)),
+            ExecClass::ExitedInGuest { code: 0 }
+        );
+        assert_eq!(
+            sim.classify_exec(&obs(Some(2), "grep: no matches", false)),
+            ExecClass::ExitedInGuest { code: 2 }
+        );
+    }
+
+    #[test]
+    fn labels_are_stable() {
+        assert_eq!(
+            ExecClass::DeniedByPerimeter { rule: "x".into() }.label(),
+            "denied_by_perimeter"
+        );
+        assert_eq!(
+            ExecClass::LaunchFailure { cause: "x".into() }.label(),
+            "launch_failure"
+        );
+        assert_eq!(ExecClass::TimedOut.label(), "timed_out");
+        assert_eq!(
+            ExecClass::ExitedInGuest { code: 0 }.label(),
+            "exited_in_guest"
+        );
     }
 }

@@ -32,7 +32,7 @@ use lex_os_audit::{AuditLog, Event};
 use lex_os_manifest::{
     Dimension, EscalationError, EscalationGrant, Grant, Manifest, Reversibility,
 };
-use lex_os_perimeter::{Perimeter, SandboxPolicy};
+use lex_os_perimeter::{ExecObservation, Perimeter, SandboxPolicy};
 use lex_os_resolver::{resolve, Environment, ResolveError};
 
 /// A monotonic clock the supervisor reads for wall-clock budgeting.
@@ -383,6 +383,20 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
                     stderr,
                     timed_out,
                 } => {
+                    // #61: the backend owns the mapping from raw failure
+                    // shapes to the closed outcome vocabulary — logged
+                    // before the terminal event so the record separates
+                    // "denied by the wall" / "never launched" / "ran and
+                    // exited" per the backend's own dialect.
+                    let class = self.perimeter.classify_exec(&ExecObservation {
+                        exit_code,
+                        stderr: stderr.clone(),
+                        timed_out,
+                    });
+                    audit.append(Event::ExecClassified {
+                        class: class.label().to_string(),
+                        detail: format!("{class:?}"),
+                    });
                     audit.append(Event::SessionEnded {
                         outcome: format!(
                             "exec_result exit_code={exit_code:?} timed_out={timed_out}"
@@ -1272,6 +1286,7 @@ mod tests {
                     Event::EscalationGranted { .. } => "EscalationGranted",
                     Event::EscalationRejected { .. } => "EscalationRejected",
                     Event::EscalationConsumed { .. } => "EscalationConsumed",
+                    Event::ExecClassified { .. } => "ExecClassified",
                     _ => "other",
                 }
                 .to_string()
@@ -1455,5 +1470,33 @@ mod tests {
         assert!(!slot.is_armed());
         let ks = kinds(&audit);
         assert!(ks.contains(&"EscalationConsumed".to_string()));
+    }
+
+    #[test]
+    fn exec_result_is_classified_in_the_audit_log() {
+        let m = manifest(
+            Grant::new(Level::ReadWrite, Level::None, Level::Full),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let mut agent = ScriptedAgent::new(vec![AgentAction::ExecResult {
+            exit_code: Some(0),
+            stdout: "ok".into(),
+            stderr: String::new(),
+            timed_out: false,
+        }]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+        let ks = kinds(&report.audit);
+        assert!(
+            ks.contains(&"ExecClassified".to_string()),
+            "exec outcome must be classified in the record: {ks:?}"
+        );
+        report.audit.verify().unwrap();
     }
 }

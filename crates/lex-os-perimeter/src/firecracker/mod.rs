@@ -19,7 +19,7 @@ use vm::FirecrackerVm;
 
 pub use jail::JailConfig;
 
-use crate::{BoxState, Perimeter, PerimeterError, SandboxPolicy};
+use crate::{BoxState, ExecClass, ExecObservation, Perimeter, PerimeterError, SandboxPolicy};
 use lex_os_manifest::{Dimension, IsolationFloor, Level};
 
 /// Paths the perimeter needs to find at runtime. Override per-instance for
@@ -159,6 +159,25 @@ impl Perimeter for FirecrackerPerimeter {
         }
         self.teardown_host();
         self.state = BoxState::Dead;
+    }
+
+    /// The real box's denial dialect: the strings the guest KERNEL
+    /// produces when one of this backend's walls refuses an effect —
+    /// EPERM/EACCES renderings for the fs/exec walls, the unreachable
+    /// errors the no-NIC / firewalled network config yields. Only shapes
+    /// this backend genuinely produces; notably NOT the simulator's
+    /// "[sim-denied:" marker.
+    fn classify_exec(&self, obs: &ExecObservation) -> ExecClass {
+        ExecClass::classify_with_dialect(
+            obs,
+            &[
+                "Permission denied",
+                "Operation not permitted",
+                "Network is unreachable",
+                "Connection refused",
+                "Read-only file system",
+            ],
+        )
     }
 }
 
@@ -444,5 +463,34 @@ mod tests {
         let policy = SandboxPolicy::from_grant(&Grant::top());
         // MicroVm floor policy fits inside a MicroVm backend.
         assert!(perim.provision(policy).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod exec_dialect_tests {
+    use super::*;
+    use crate::{ExecClass, ExecObservation, Perimeter};
+
+    fn obs(exit_code: Option<i32>, stderr: &str) -> ExecObservation {
+        ExecObservation {
+            exit_code,
+            stderr: stderr.to_string(),
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn firecracker_dialect_matches_kernel_wall_strings_only() {
+        let fc = FirecrackerPerimeter::new();
+        // A kernel-wall refusal inside the guest is a perimeter denial…
+        let denied = fc.classify_exec(&obs(Some(1), "curl: Network is unreachable"));
+        assert!(matches!(denied, ExecClass::DeniedByPerimeter { .. }));
+        // …the SIMULATOR's marker is not in this backend's dialect: the
+        // real box never emits it, so it must not classify as a denial.
+        let simmish = fc.classify_exec(&obs(Some(1), "[sim-denied: net]"));
+        assert_eq!(simmish, ExecClass::ExitedInGuest { code: 1 });
+        // Runner-failure evidence still wins over signatures.
+        let launch = fc.classify_exec(&obs(None, "Permission denied"));
+        assert!(matches!(launch, ExecClass::LaunchFailure { .. }));
     }
 }

@@ -106,6 +106,13 @@ pub enum Event {
     /// command) or "insufficient" (even the delta did not cover the
     /// required level). Either way the grant is dead afterwards.
     EscalationConsumed { command: String, outcome: String },
+    /// The classified outcome of an in-box execution (#61): `class` is
+    /// the backend-independent stable label (denied_by_perimeter /
+    /// launch_failure / timed_out / exited_in_guest), `detail` the
+    /// backend-dialect specifics (matched rule, cause, or exit code).
+    /// "The perimeter denied X" and "X never launched" are different
+    /// facts; conflating them poisons both debugging and the record.
+    ExecClassified { class: String, detail: String },
     /// The session reached a terminal state.
     SessionEnded { outcome: String },
 }
