@@ -126,7 +126,12 @@ pub(super) fn create_tap(
         "tap".into(),
     ];
     if let Some((uid, gid)) = owner {
-        add.extend(["user".into(), uid.to_string(), "group".into(), gid.to_string()]);
+        add.extend([
+            "user".into(),
+            uid.to_string(),
+            "group".into(),
+            gid.to_string(),
+        ]);
     }
     run("ip", &as_str_slice(&add))?;
     run("ip", &["addr", "add", host_ip_cidr, "dev", tap])?;
@@ -388,8 +393,18 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "-A", "INPUT", "-i", "tap-lex0", "-d", "169.254.42.1", "-p", "tcp", "--dport",
-                "443", "-j", "ACCEPT"
+                "-A",
+                "INPUT",
+                "-i",
+                "tap-lex0",
+                "-d",
+                "169.254.42.1",
+                "-p",
+                "tcp",
+                "--dport",
+                "443",
+                "-j",
+                "ACCEPT"
             ]
         );
     }
