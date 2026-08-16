@@ -20,7 +20,9 @@ set its own limits, stop.
 ## Layout
 
 - `crates/lex-os-manifest` — manifest, grant, budget, reversibility,
-  isolation floor. Content-addressable.
+  isolation floor. Content-addressable. Also the one-shot
+  `EscalationGrant` (#60): a human-signed, strictly-widening delta bound
+  to a single command — the manifest itself never mutates.
 - `crates/lex-os-audit` — hash-chained tamper-evident log. Append-only;
   never add an "edit" or "truncate" API.
 - `crates/lex-os-perimeter` — `SandboxPolicy::from_grant` is the single

@@ -29,7 +29,9 @@ pub use skill::{mediate_skill, SkillVerdict};
 pub use vsock_agent::VsockAgent;
 
 use lex_os_audit::{AuditLog, Event};
-use lex_os_manifest::{Dimension, Manifest, Reversibility};
+use lex_os_manifest::{
+    Dimension, EscalationError, EscalationGrant, Grant, Manifest, Reversibility,
+};
 use lex_os_perimeter::{Perimeter, SandboxPolicy};
 use lex_os_resolver::{resolve, Environment, ResolveError};
 
@@ -546,6 +548,34 @@ impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
     /// Apply the gate to one command, appending the same events and returning
     /// the same [`Decision`] the supervisor loop would.
     pub fn mediate(&self, name: &str, audit: &mut AuditLog, ledger: &mut BudgetLedger) -> Decision {
+        self.mediate_inner(name, audit, ledger, None)
+    }
+
+    /// The gate with a one-shot escalation slot in scope (#60). Identical to
+    /// [`Mediator::mediate`] in every leg and every logged event; the only
+    /// difference is that a perimeter denial may consult (and thereby
+    /// CONSUME) an armed escalation bound to this command. The slot is
+    /// consulted after the reversibility leg, so an
+    /// irreversible-consequential command is refused before any delta can
+    /// reach it — structurally, not by convention.
+    pub fn mediate_escalated(
+        &self,
+        name: &str,
+        audit: &mut AuditLog,
+        ledger: &mut BudgetLedger,
+        slot: &mut EscalationSlot,
+        manifest_grant: &Grant,
+    ) -> Decision {
+        self.mediate_inner(name, audit, ledger, Some((slot, manifest_grant)))
+    }
+
+    fn mediate_inner(
+        &self,
+        name: &str,
+        audit: &mut AuditLog,
+        ledger: &mut BudgetLedger,
+        mut escalation: Option<(&mut EscalationSlot, &Grant)>,
+    ) -> Decision {
         let Some(cmd) = self.registry.get(name) else {
             audit.append(Event::CommandRequested {
                 seq: ledger.commands_used(),
@@ -582,14 +612,38 @@ impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
         }
 
         // (2) Capability gate, enforced at the perimeter (the kernel
-        // wall). This holds even if the agent tries to bypass Lex.
+        // wall). This holds even if the agent tries to bypass Lex. A
+        // denial here may consume a one-shot escalation bound to this
+        // command (#60): the delta was validated and logged when armed;
+        // consumption is logged now, and the grant is dead afterwards
+        // regardless of what the rest of the gate decides.
         if let Err(e) = self.perimeter.check(cmd.dimension, cmd.required_level) {
-            let reason = format!("blocked by perimeter: {e}");
-            audit.append(Event::CommandDenied {
-                command: name.to_string(),
-                reason: reason.clone(),
-            });
-            return Decision::Denied(reason);
+            let widened = match escalation.as_mut() {
+                Some((slot, manifest_grant)) => match slot.take_for(name, manifest_grant) {
+                    Some(esc) => {
+                        let admitted = cmd.required_level.leq(esc.delta.level(cmd.dimension));
+                        audit.append(Event::EscalationConsumed {
+                            command: name.to_string(),
+                            outcome: if admitted {
+                                "applied".to_string()
+                            } else {
+                                "insufficient".to_string()
+                            },
+                        });
+                        admitted
+                    }
+                    None => false,
+                },
+                None => false,
+            };
+            if !widened {
+                let reason = format!("blocked by perimeter: {e}");
+                audit.append(Event::CommandDenied {
+                    command: name.to_string(),
+                    reason: reason.clone(),
+                });
+                return Decision::Denied(reason);
+            }
         }
 
         // (3) Budget gate. The charge is computed *before* the effect;
@@ -617,6 +671,80 @@ impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
             command: name.to_string(),
         });
         Decision::Allowed
+    }
+}
+
+/// The host-side holder of at most one armed escalation (#60). Only the
+/// supervisor's caller — the human side of the boundary — ever holds a
+/// mutable reference; the in-guest agent has no path to it, so an agent
+/// can never arm its own widening. Arming validates and LOGS the grant
+/// (with its resolver) before any re-evaluation can use it; consumption
+/// is one-shot and happens inside the mediation gate.
+#[derive(Default)]
+pub struct EscalationSlot {
+    pending: Option<EscalationGrant>,
+}
+
+impl EscalationSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Arm the slot with a validated escalation. A rejected escalation is
+    /// logged with its verbatim reason and the slot stays empty — refuse,
+    /// don't downgrade. A second arm before consumption replaces the
+    /// first (and logs the replacement grant like any other).
+    pub fn grant(
+        &mut self,
+        esc: EscalationGrant,
+        manifest_grant: &Grant,
+        audit: &mut AuditLog,
+    ) -> Result<(), EscalationError> {
+        match esc.validate(manifest_grant, &esc.command) {
+            Err(e) => {
+                audit.append(Event::EscalationRejected {
+                    command: esc.command.clone(),
+                    reason: e.to_string(),
+                });
+                Err(e)
+            }
+            Ok(()) => {
+                audit.append(Event::EscalationGranted {
+                    command: esc.command.clone(),
+                    resolver: esc.resolver.clone(),
+                    filesystem: format!("{:?}", esc.delta.filesystem),
+                    network: format!("{:?}", esc.delta.network),
+                    exec: format!("{:?}", esc.delta.exec),
+                });
+                self.pending = Some(esc);
+                Ok(())
+            }
+        }
+    }
+
+    /// True if an unconsumed escalation is armed.
+    pub fn is_armed(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Consume the armed escalation iff it is bound to `command` and still
+    /// valid against the manifest grant at USE time (the world may have
+    /// moved between arm and use). Returns None — without consuming — for
+    /// a different command; returns and CONSUMES for the bound command.
+    fn take_for(&mut self, command: &str, manifest_grant: &Grant) -> Option<EscalationGrant> {
+        let bound = self
+            .pending
+            .as_ref()
+            .map(|e| e.command == command)
+            .unwrap_or(false);
+        if !bound {
+            return None;
+        }
+        let esc = self.pending.take().expect("checked above");
+        match esc.validate(manifest_grant, command) {
+            Ok(()) => Some(esc),
+            Err(_) => None,
+        }
     }
 }
 
@@ -1111,5 +1239,221 @@ mod tests {
         assert!(nd.contains("skill_outcome"));
         assert!(nd.contains("not in the grant") || nd.contains("outside workspace"));
         assert!(report.audit.verify().is_ok());
+    }
+
+    // ── Escalation grants (#60) ─────────────────────────────────────────
+
+    fn escalation_ctx(
+        grant: Grant,
+    ) -> (CommandRegistry, SimulatedPerimeter, ManualClock, Manifest) {
+        // net.fetch charges 5c/1 api call; give the ledger real headroom so
+        // these tests exercise the escalation legs, not the budget one.
+        let budget = Budget {
+            wall_clock_secs: 300,
+            max_commands: 100,
+            max_money_cents: 100,
+            max_api_calls: 50,
+        };
+        let m = manifest(grant, budget);
+        let mut per = SimulatedPerimeter::new();
+        per.provision(SandboxPolicy::from_manifest(&m)).unwrap();
+        (registry(), per, ManualClock::new(), m)
+    }
+
+    fn kinds(audit: &AuditLog) -> Vec<String> {
+        audit
+            .entries()
+            .iter()
+            .map(|e| {
+                match &e.event {
+                    Event::CommandRequested { .. } => "CommandRequested",
+                    Event::CommandAllowed { .. } => "CommandAllowed",
+                    Event::CommandDenied { .. } => "CommandDenied",
+                    Event::EscalationGranted { .. } => "EscalationGranted",
+                    Event::EscalationRejected { .. } => "EscalationRejected",
+                    Event::EscalationConsumed { .. } => "EscalationConsumed",
+                    _ => "other",
+                }
+                .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn escalation_roundtrip_is_one_shot() {
+        let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
+        let (reg, per, clock, m) = escalation_ctx(grant);
+        let med = Mediator::new(&reg, &per, &clock);
+        let mut audit = AuditLog::new();
+        let mut ledger = BudgetLedger::new(m.budget, 0);
+        let mut slot = EscalationSlot::new();
+
+        // 1. Refused: the grant has no network authority.
+        let d1 = med.mediate("net.fetch", &mut audit, &mut ledger);
+        assert!(matches!(d1, Decision::Denied(_)));
+
+        // 2. A human arms a one-shot, strictly-widening delta — logged
+        //    with its resolver BEFORE any re-evaluation.
+        let esc = EscalationGrant {
+            command: "net.fetch".into(),
+            delta: Grant::new(Level::ReadOnly, Level::Allowlist, Level::None),
+            resolver: "alfonso@board".into(),
+        };
+        slot.grant(esc, &m.grant, &mut audit).unwrap();
+        assert!(slot.is_armed());
+
+        // 3. The widened check admits exactly that command, once.
+        let d2 = med.mediate_escalated("net.fetch", &mut audit, &mut ledger, &mut slot, &m.grant);
+        assert_eq!(d2, Decision::Allowed);
+        assert!(!slot.is_armed());
+
+        // 4. Replay: the grant is dead; the retry is refused again.
+        let d3 = med.mediate_escalated("net.fetch", &mut audit, &mut ledger, &mut slot, &m.grant);
+        assert!(matches!(d3, Decision::Denied(_)));
+
+        // The record reads: refusal → grant (with resolver) → consumption
+        // → allow → refusal, in that order.
+        let ks = kinds(&audit);
+        let order = [
+            "CommandDenied",
+            "EscalationGranted",
+            "EscalationConsumed",
+            "CommandAllowed",
+            "CommandDenied",
+        ];
+        let mut idx = 0;
+        for k in &ks {
+            if idx < order.len() && k == order[idx] {
+                idx += 1;
+            }
+        }
+        assert_eq!(idx, order.len(), "audit order wrong: {ks:?}");
+        audit.verify().unwrap();
+    }
+
+    #[test]
+    fn non_widening_escalation_is_rejected_structurally() {
+        let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
+        let (_, _, _, m) = escalation_ctx(grant);
+        let mut audit = AuditLog::new();
+        let mut slot = EscalationSlot::new();
+        // Asking for exactly what the manifest already grants must never
+        // reach a human: rejected at arm time, slot stays empty.
+        let esc = EscalationGrant {
+            command: "net.fetch".into(),
+            delta: grant,
+            resolver: "alfonso@board".into(),
+        };
+        assert_eq!(
+            slot.grant(esc, &m.grant, &mut audit),
+            Err(EscalationError::NotWidening)
+        );
+        assert!(!slot.is_armed());
+        let ks = kinds(&audit);
+        assert!(ks.contains(&"EscalationRejected".to_string()));
+    }
+
+    #[test]
+    fn narrowing_and_anonymous_escalations_are_rejected() {
+        let grant = Grant::new(Level::ReadWrite, Level::None, Level::None);
+        let (_, _, _, m) = escalation_ctx(grant);
+        let mut audit = AuditLog::new();
+        let mut slot = EscalationSlot::new();
+        // Narrows filesystem while widening network: refused.
+        let narrowing = EscalationGrant {
+            command: "net.fetch".into(),
+            delta: Grant::new(Level::ReadOnly, Level::Allowlist, Level::None),
+            resolver: "alfonso@board".into(),
+        };
+        assert!(matches!(
+            slot.grant(narrowing, &m.grant, &mut audit),
+            Err(EscalationError::NarrowsDimension(Dimension::Filesystem))
+        ));
+        // No resolver, no grant.
+        let anonymous = EscalationGrant {
+            command: "net.fetch".into(),
+            delta: Grant::new(Level::ReadWrite, Level::Allowlist, Level::None),
+            resolver: "  ".into(),
+        };
+        assert_eq!(
+            slot.grant(anonymous, &m.grant, &mut audit),
+            Err(EscalationError::EmptyResolver)
+        );
+        assert!(!slot.is_armed());
+    }
+
+    #[test]
+    fn irreversible_consequential_is_unreachable_even_with_a_delta() {
+        let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
+        let (reg, per, clock, m) = escalation_ctx(grant);
+        let med = Mediator::new(&reg, &per, &clock);
+        let mut audit = AuditLog::new();
+        let mut ledger = BudgetLedger::new(m.budget, 0);
+        let mut slot = EscalationSlot::new();
+        let esc = EscalationGrant {
+            command: "fs.delete_all".into(),
+            delta: Grant::top(),
+            resolver: "alfonso@board".into(),
+        };
+        slot.grant(esc, &m.grant, &mut audit).unwrap();
+        // The reversibility leg runs BEFORE escalation is consulted: the
+        // command is refused and the delta is NOT consumed — no grant can
+        // reach an irreversible-consequential command, structurally.
+        let d = med.mediate_escalated(
+            "fs.delete_all",
+            &mut audit,
+            &mut ledger,
+            &mut slot,
+            &m.grant,
+        );
+        assert!(matches!(d, Decision::Denied(_)));
+        assert!(
+            slot.is_armed(),
+            "delta must not be consumed by the reversibility refusal"
+        );
+    }
+
+    #[test]
+    fn escalation_bound_to_another_command_is_not_consumed() {
+        let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
+        let (reg, per, clock, m) = escalation_ctx(grant);
+        let med = Mediator::new(&reg, &per, &clock);
+        let mut audit = AuditLog::new();
+        let mut ledger = BudgetLedger::new(m.budget, 0);
+        let mut slot = EscalationSlot::new();
+        let esc = EscalationGrant {
+            command: "net.fetch".into(),
+            delta: Grant::new(Level::ReadWrite, Level::Allowlist, Level::None),
+            resolver: "alfonso@board".into(),
+        };
+        slot.grant(esc, &m.grant, &mut audit).unwrap();
+        // fs.write needs ReadWrite; the grant is ReadOnly → denied, and the
+        // net.fetch-bound delta stays armed.
+        let d = med.mediate_escalated("fs.write", &mut audit, &mut ledger, &mut slot, &m.grant);
+        assert!(matches!(d, Decision::Denied(_)));
+        assert!(slot.is_armed());
+    }
+
+    #[test]
+    fn insufficient_delta_is_consumed_and_logged() {
+        let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
+        let (reg, per, clock, m) = escalation_ctx(grant);
+        let med = Mediator::new(&reg, &per, &clock);
+        let mut audit = AuditLog::new();
+        let mut ledger = BudgetLedger::new(m.budget, 0);
+        let mut slot = EscalationSlot::new();
+        // Widens network, but only to Loopback — net.fetch needs Allowlist.
+        let esc = EscalationGrant {
+            command: "net.fetch".into(),
+            delta: Grant::new(Level::ReadOnly, Level::Loopback, Level::None),
+            resolver: "alfonso@board".into(),
+        };
+        slot.grant(esc, &m.grant, &mut audit).unwrap();
+        let d = med.mediate_escalated("net.fetch", &mut audit, &mut ledger, &mut slot, &m.grant);
+        assert!(matches!(d, Decision::Denied(_)));
+        // One-shot regardless of outcome: dead afterwards.
+        assert!(!slot.is_armed());
+        let ks = kinds(&audit);
+        assert!(ks.contains(&"EscalationConsumed".to_string()));
     }
 }
