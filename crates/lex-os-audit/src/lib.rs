@@ -86,6 +86,26 @@ pub enum Event {
     /// A capsule install was refused, with the reason (an untrusted signer,
     /// a substituted archive, a widening grant, an unsatisfiable host, …).
     CapsuleRefused { artifact: String, reason: String },
+    /// A one-shot escalation grant was armed by a named resolver for a
+    /// single command (#60). Logged BEFORE any re-evaluation uses it —
+    /// the authorization is on the record even if the widened call never
+    /// happens. The grant levels are recorded verbatim.
+    EscalationGranted {
+        command: String,
+        resolver: String,
+        filesystem: String,
+        network: String,
+        exec: String,
+    },
+    /// An escalation was rejected at arm time (non-widening, empty
+    /// resolver, wrong command). A rejected escalation must be as legible
+    /// in the record as an applied one.
+    EscalationRejected { command: String, reason: String },
+    /// An armed escalation was consumed by exactly one mediation of its
+    /// command — `outcome` is "applied" (the widened check admitted the
+    /// command) or "insufficient" (even the delta did not cover the
+    /// required level). Either way the grant is dead afterwards.
+    EscalationConsumed { command: String, outcome: String },
     /// The session reached a terminal state.
     SessionEnded { outcome: String },
 }
@@ -361,7 +381,9 @@ mod tests {
     #[test]
     fn skill_outcome_event_chains_and_verifies() {
         let mut log = AuditLog::new();
-        log.append(Event::CommandAllowed { command: "move_to".into() });
+        log.append(Event::CommandAllowed {
+            command: "move_to".into(),
+        });
         log.append(Event::SkillOutcome {
             command: "move_to".into(),
             outcome: "reached".into(),

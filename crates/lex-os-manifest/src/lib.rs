@@ -637,3 +637,77 @@ mod tests {
         assert_eq!(back2.actuation, with_act.actuation);
     }
 }
+
+// ── Escalation grants (#60) ──────────────────────────────────────────────────
+//
+// A one-shot, human-signed grant DELTA bound to a single named command. The
+// manifest's grant never mutates; an escalation is a second, narrower kind of
+// declaration — "for exactly this refused command, this resolver authorizes
+// this wider grant, once". Validation is strict:
+//   - the delta must STRICTLY widen the manifest grant (≥ on every dimension,
+//     > on at least one) — asking for what the manifest already allows is a
+//     structural no (it must never reach a human);
+//   - the resolver identity is mandatory (who authorized is part of the
+//     audit story, not an optional nicety);
+//   - the binding is to one command name, checked again at consumption.
+// The supervisor's gate consumes a validated escalation for exactly one
+// mediation of that command and never for reversibility refusals —
+// IrreversibleConsequential is refused before escalation is consulted, so no
+// delta can reach it by construction.
+
+/// One-shot escalation: a grant delta bound to a single command, authorized
+/// by a named resolver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscalationGrant {
+    /// The exact registered command name this delta applies to.
+    pub command: String,
+    /// The effective grant for that one call. Must strictly widen the
+    /// manifest grant.
+    pub delta: Grant,
+    /// Who authorized it. Recorded verbatim in the audit chain.
+    pub resolver: String,
+}
+
+/// Why an escalation grant was rejected. Every arm is a distinct, verbatim
+/// reason — a rejected escalation must be as legible in the audit log as an
+/// applied one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EscalationError {
+    #[error("escalation resolver must be a named identity, not empty")]
+    EmptyResolver,
+    #[error("escalation delta does not widen the manifest grant on any dimension — a non-widening request is answered structurally, never escalated to a human")]
+    NotWidening,
+    #[error("escalation delta narrows the manifest grant on {0} — a delta may only widen")]
+    NarrowsDimension(Dimension),
+    #[error("escalation is bound to command `{bound}` but was presented for `{requested}`")]
+    WrongCommand { bound: String, requested: String },
+}
+
+impl EscalationGrant {
+    /// Validate this escalation against the manifest grant and the command
+    /// it is being presented for. Pure; no clock, no state.
+    pub fn validate(
+        &self,
+        manifest_grant: &Grant,
+        requested_command: &str,
+    ) -> Result<(), EscalationError> {
+        if self.resolver.trim().is_empty() {
+            return Err(EscalationError::EmptyResolver);
+        }
+        if self.command != requested_command {
+            return Err(EscalationError::WrongCommand {
+                bound: self.command.clone(),
+                requested: requested_command.to_string(),
+            });
+        }
+        for &d in Dimension::ALL.iter() {
+            if !manifest_grant.level(d).leq(self.delta.level(d)) {
+                return Err(EscalationError::NarrowsDimension(d));
+            }
+        }
+        if self.delta == *manifest_grant {
+            return Err(EscalationError::NotWidening);
+        }
+        Ok(())
+    }
+}
