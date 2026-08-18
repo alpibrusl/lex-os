@@ -94,6 +94,18 @@ pub(super) fn build_jailer_argv(
         cfg.chroot_base.display().to_string(),
         "--cgroup-version".into(),
         "2".into(),
+        // Make cgroup creation DETERMINISTIC rather than a host-dependent
+        // jailer default: without any --parent-cgroup/--cgroup flag, whether
+        // jailer creates `<mount>/firecracker/<id>` at all varies by host
+        // (found live: on GitHub-hosted runners it creates nothing, so
+        // verify_cgroup_dir refused every launch). --parent-cgroup pins the
+        // path our cgroup_v2_dir guess + teardown assume, and the no-op
+        // pids.max=max setting forces jailer to actually create and join the
+        // cgroup on every host.
+        "--parent-cgroup".into(),
+        "firecracker".into(),
+        "--cgroup".into(),
+        "pids.max=max".into(),
         // Firecracker's own args follow.
         "--".into(),
         "--api-sock".into(),
@@ -150,6 +162,8 @@ mod tests {
             ("--gid", "107"),
             ("--chroot-base-dir", "/srv/jail"),
             ("--cgroup-version", "2"),
+            ("--parent-cgroup", "firecracker"),
+            ("--cgroup", "pids.max=max"),
         ] {
             let i = argv.iter().position(|a| a == pair.0).expect(pair.0);
             assert_eq!(argv[i + 1], pair.1, "value after {}", pair.0);
