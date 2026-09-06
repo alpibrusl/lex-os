@@ -17,6 +17,9 @@ pub use lex_types::trust::{Dimension, Grant, GrantId, Level, TrustError};
 mod actuation;
 pub use actuation::{Actuation, ActuatorArm, ActuatorBase, ActuatorGripper, Range};
 
+pub mod facet;
+pub use facet::{Facet, FacetError};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -202,6 +205,8 @@ pub enum ManifestError {
         parent: u64,
         requested: u64,
     },
+    #[error(transparent)]
+    Facet(#[from] FacetError),
 }
 
 impl Manifest {
@@ -226,9 +231,13 @@ impl Manifest {
     /// Validate that `child` is a well-formed narrowing of `self` across
     /// **every** dimension the agent could try to widen (design doc §7
     /// Attempt 3): the grant (via the trust lattice), the egress
-    /// allowlist (child ⊆ parent), and every budget ceiling
-    /// (child ≤ parent). Returns the first widening as a structured
-    /// error so the supervisor can log a `[BLOCKED:narrowing]` reason.
+    /// allowlist (child ⊆ parent), every budget ceiling (child ≤ parent),
+    /// and every [`facet`] — the authority domains carried outside the
+    /// lattice. Returns the first widening as a structured error so the
+    /// supervisor can log a `[BLOCKED:narrowing]` reason.
+    ///
+    /// A facet is checked even when the parent does not carry it: a child
+    /// cannot claim authority its parent never held.
     pub fn validate_narrowing(parent: &Manifest, child: &Manifest) -> Result<(), ManifestError> {
         // Grant: child must be ≤ parent on the trust lattice.
         Grant::narrow(&parent.grant, &child.grant)?;
@@ -275,6 +284,10 @@ impl Manifest {
                 });
             }
         }
+        // Facets: every authority domain carried outside the trust lattice
+        // narrows too. Until lex-os#66 this loop did not exist, so a child
+        // could widen its actuation envelope unchallenged.
+        facet::validate_optional(parent.actuation.as_ref(), child.actuation.as_ref())?;
         Ok(())
     }
 
@@ -389,6 +402,7 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn analyze_manifest() -> Manifest {
         // "analyze data -> report": filesystem read only, no network, no
@@ -531,6 +545,70 @@ mod tests {
         // with_floor only raises; grant still implies microVM.
         assert_eq!(m.isolation_floor, IsolationFloor::MicroVm);
         assert!(m.validate().is_ok());
+    }
+
+    /// The narrowing wall covers facets, not just grant/egress/budget
+    /// (lex-os#66). Before the facet loop existed this child sailed
+    /// through: `validate_narrowing` never looked at `actuation`.
+    #[test]
+    fn narrowing_rejects_actuation_widening() {
+        let base = Manifest::new(
+            Goal::new("p"),
+            Grant::new(Level::ReadOnly, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let actuation = Actuation {
+            skills: vec!["move_to".into()],
+            arms: BTreeMap::from([(
+                "arm".to_string(),
+                ActuatorArm {
+                    workspace_m: [
+                        Range { min: 0.0, max: 0.5 },
+                        Range { min: 0.0, max: 0.5 },
+                        Range { min: 0.0, max: 0.5 },
+                    ],
+                    max_velocity_mps: 0.25,
+                    max_force_n: 15.0,
+                },
+            )]),
+            grippers: BTreeMap::new(),
+            bases: BTreeMap::new(),
+        };
+        let parent = Manifest {
+            actuation: Some(actuation.clone()),
+            ..base.clone()
+        };
+
+        // Child raises the arm's force ceiling 30x.
+        let mut wider = actuation.clone();
+        wider.arms.get_mut("arm").unwrap().max_force_n = 450.0;
+        let child = Manifest {
+            actuation: Some(wider),
+            ..base.clone()
+        };
+        let err = Manifest::validate_narrowing(&parent, &child).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Facet(f) if f.facet == "actuation"),
+            "expected a facet refusal, got {err}"
+        );
+
+        // A child that drops the facet entirely is fine.
+        let dropped = Manifest {
+            actuation: None,
+            ..base.clone()
+        };
+        assert!(Manifest::validate_narrowing(&parent, &dropped).is_ok());
+
+        // A child claiming actuation its parent never held is refused —
+        // authority cannot appear from nowhere.
+        let from_nowhere = Manifest {
+            actuation: Some(actuation),
+            ..base.clone()
+        };
+        assert!(matches!(
+            Manifest::validate_narrowing(&base, &from_nowhere).unwrap_err(),
+            ManifestError::Facet(_)
+        ));
     }
 
     #[test]
