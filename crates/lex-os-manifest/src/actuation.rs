@@ -17,6 +17,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::facet::{
+    narrow_allowlist, narrow_cap, narrow_keyed, narrow_range, Facet, FacetError, AXES,
+};
+
 /// A closed interval `[min, max]` in metres for one workspace axis.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Range {
@@ -222,6 +226,104 @@ impl Actuation {
     }
 }
 
+/// The actuation grant narrows like any other facet (lex-os#66): a child
+/// may drop skills and actuators and tighten every envelope, and may not
+/// add a skill, name an actuator the parent never granted, or raise a cap.
+///
+/// Before this impl existed, `Manifest::validate_narrowing` checked the
+/// grant, the egress allowlist and the budgets but *not* actuation — so a
+/// child could hand itself a wider workspace box or a higher force ceiling
+/// and the narrowing wall would pass it.
+impl Facet for Actuation {
+    const NAME: &'static str = "actuation";
+
+    fn validate_narrowing(parent: &Self, child: &Self) -> Result<(), FacetError> {
+        narrow_allowlist(
+            Self::NAME,
+            "skills",
+            parent.skills.iter().map(String::as_str),
+            child.skills.iter().map(String::as_str),
+        )?;
+
+        narrow_keyed(
+            Self::NAME,
+            "arms",
+            &parent.arms,
+            &child.arms,
+            |key, parent_arm, child_arm| {
+                for (axis, (p, c)) in AXES.iter().zip(
+                    parent_arm
+                        .workspace_m
+                        .iter()
+                        .zip(child_arm.workspace_m.iter()),
+                ) {
+                    narrow_range(
+                        Self::NAME,
+                        &format!("arms.{key}.workspace_m.{axis}"),
+                        *p,
+                        *c,
+                    )?;
+                }
+                narrow_cap(
+                    Self::NAME,
+                    &format!("arms.{key}.max_velocity_mps"),
+                    parent_arm.max_velocity_mps,
+                    child_arm.max_velocity_mps,
+                )?;
+                narrow_cap(
+                    Self::NAME,
+                    &format!("arms.{key}.max_force_n"),
+                    parent_arm.max_force_n,
+                    child_arm.max_force_n,
+                )
+            },
+        )?;
+
+        narrow_keyed(
+            Self::NAME,
+            "grippers",
+            &parent.grippers,
+            &child.grippers,
+            |key, parent_gripper, child_gripper| {
+                narrow_cap(
+                    Self::NAME,
+                    &format!("grippers.{key}.max_grip_force_n"),
+                    parent_gripper.max_grip_force_n,
+                    child_gripper.max_grip_force_n,
+                )
+            },
+        )?;
+
+        narrow_keyed(
+            Self::NAME,
+            "bases",
+            &parent.bases,
+            &child.bases,
+            |key, parent_base, child_base| {
+                for (axis, (p, c)) in AXES.iter().zip(
+                    parent_base
+                        .floor_area_m
+                        .iter()
+                        .zip(child_base.floor_area_m.iter()),
+                ) {
+                    narrow_range(
+                        Self::NAME,
+                        &format!("bases.{key}.floor_area_m.{axis}"),
+                        *p,
+                        *c,
+                    )?;
+                }
+                narrow_cap(
+                    Self::NAME,
+                    &format!("bases.{key}.max_speed_mps"),
+                    parent_base.max_speed_mps,
+                    child_base.max_speed_mps,
+                )
+            },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +384,114 @@ mod tests {
             ]),
             bases: BTreeMap::new(),
         }
+    }
+
+    // --- Facet narrowing (lex-os#66) ---------------------------------
+
+    /// A child that drops skills and tightens every envelope is a valid
+    /// narrowing — the ordinary case, and the one that must keep working.
+    #[test]
+    fn actuation_narrowing_accepts_a_tighter_child() {
+        let parent = sample_with_base();
+        let mut child = parent.clone();
+        child.skills = vec!["move_to".into()]; // dropped grasp + run_policy
+        child.arms.get_mut("arm").unwrap().max_force_n = 5.0; // 15 -> 5
+        child.arms.get_mut("arm").unwrap().workspace_m[0] = Range { min: 0.2, max: 0.4 };
+        child.grippers.get_mut("gripper").unwrap().max_grip_force_n = 1.0;
+        child.bases.get_mut("base").unwrap().max_speed_mps = 0.1;
+        assert!(Actuation::validate_narrowing(&parent, &child).is_ok());
+
+        // Dropping an actuator kind entirely is narrowing too.
+        child.bases.clear();
+        assert!(Actuation::validate_narrowing(&parent, &child).is_ok());
+    }
+
+    /// The gap this facet closes: before lex-os#66 every one of these
+    /// passed the narrowing wall untouched.
+    #[test]
+    fn actuation_narrowing_rejects_each_widening() {
+        let parent = sample_with_base();
+
+        // A skill the parent never granted.
+        let mut extra_skill = parent.clone();
+        extra_skill.skills.push("open_door".into());
+        let err = Actuation::validate_narrowing(&parent, &extra_skill).unwrap_err();
+        assert_eq!(err.facet, "actuation");
+        assert!(err.detail.contains("open_door"), "{}", err.detail);
+
+        // An arm the parent never granted.
+        let mut extra_arm = parent.clone();
+        extra_arm.arms.insert("third".into(), arm());
+        assert!(Actuation::validate_narrowing(&parent, &extra_arm).is_err());
+
+        // A workspace box reaching outside the parent's.
+        let mut wider_box = parent.clone();
+        wider_box.arms.get_mut("arm").unwrap().workspace_m[2] = Range { min: 0.0, max: 9.0 };
+        let err = Actuation::validate_narrowing(&parent, &wider_box).unwrap_err();
+        assert!(err.detail.contains("workspace_m.z"), "{}", err.detail);
+
+        // A raised velocity cap.
+        let mut faster = parent.clone();
+        faster.arms.get_mut("arm").unwrap().max_velocity_mps = 2.0;
+        assert!(Actuation::validate_narrowing(&parent, &faster).is_err());
+
+        // A raised force cap — the one that hurts a human.
+        let mut stronger = parent.clone();
+        stronger.arms.get_mut("arm").unwrap().max_force_n = 500.0;
+        let err = Actuation::validate_narrowing(&parent, &stronger).unwrap_err();
+        assert!(err.detail.contains("max_force_n"), "{}", err.detail);
+
+        // A raised grip force.
+        let mut crushing = parent.clone();
+        crushing
+            .grippers
+            .get_mut("gripper")
+            .unwrap()
+            .max_grip_force_n = 400.0;
+        assert!(Actuation::validate_narrowing(&parent, &crushing).is_err());
+
+        // A larger floor area and a faster base.
+        let mut roaming = parent.clone();
+        roaming.bases.get_mut("base").unwrap().floor_area_m[0] = Range {
+            min: -50.0,
+            max: 50.0,
+        };
+        assert!(Actuation::validate_narrowing(&parent, &roaming).is_err());
+        let mut speeding = parent.clone();
+        speeding.bases.get_mut("base").unwrap().max_speed_mps = 3.0;
+        assert!(Actuation::validate_narrowing(&parent, &speeding).is_err());
+    }
+
+    /// NaN compares false against everything, so a naive `child > parent`
+    /// check would admit it. Refuse, don't downgrade.
+    #[test]
+    fn actuation_narrowing_refuses_nan_caps() {
+        let parent = sample();
+        let mut nan_force = parent.clone();
+        nan_force.arms.get_mut("arm").unwrap().max_force_n = f64::NAN;
+        assert!(Actuation::validate_narrowing(&parent, &nan_force).is_err());
+
+        let mut nan_box = parent.clone();
+        nan_box.arms.get_mut("arm").unwrap().workspace_m[0] = Range {
+            min: f64::NAN,
+            max: f64::NAN,
+        };
+        assert!(Actuation::validate_narrowing(&parent, &nan_box).is_err());
+    }
+
+    /// Each named actuator carries its own envelope, so a dual-arm child
+    /// cannot borrow the other arm's reach.
+    #[test]
+    fn actuation_narrowing_is_per_actuator() {
+        let parent = sample_dual_arm();
+        // The left arm claims the right arm's -y half.
+        let mut swapped = parent.clone();
+        swapped.arms.get_mut("left").unwrap().workspace_m[1] = Range {
+            min: -0.3,
+            max: 0.0,
+        };
+        let err = Actuation::validate_narrowing(&parent, &swapped).unwrap_err();
+        assert!(err.detail.contains("arms.left"), "{}", err.detail);
     }
 
     fn sample_with_base() -> Actuation {
