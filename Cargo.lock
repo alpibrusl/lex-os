@@ -891,8 +891,8 @@ dependencies = [
 
 [[package]]
 name = "lex-ast"
-version = "0.10.15"
-source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
+version = "0.10.16"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.16#91363a459cbdfe394de018cb3dc70619bfde6c58"
 dependencies = [
  "indexmap",
  "lex-syntax",
@@ -904,8 +904,8 @@ dependencies = [
 
 [[package]]
 name = "lex-bytecode"
-version = "0.10.15"
-source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
+version = "0.10.16"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.16#91363a459cbdfe394de018cb3dc70619bfde6c58"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1059,8 +1059,8 @@ dependencies = [
 
 [[package]]
 name = "lex-syntax"
-version = "0.10.15"
-source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
+version = "0.10.16"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.16#91363a459cbdfe394de018cb3dc70619bfde6c58"
 dependencies = [
  "flate2",
  "indexmap",
@@ -1076,12 +1076,13 @@ dependencies = [
 
 [[package]]
 name = "lex-types"
-version = "0.10.15"
-source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
+version = "0.10.16"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.16#91363a459cbdfe394de018cb3dc70619bfde6c58"
 dependencies = [
  "hex",
  "indexmap",
  "lex-ast",
+ "lex-syntax",
  "serde",
  "serde_json",
  "sha2 0.11.0",
