@@ -224,6 +224,13 @@ pub enum ManifestError {
     },
     #[error(transparent)]
     Facet(#[from] FacetError),
+    /// A facet is present but cannot be read as the type it is named
+    /// for. Distinct from [`ManifestError::Facet`], which is a
+    /// *narrowing* refusal: nothing widened here, the JSON simply does
+    /// not parse, and saying "widens" would send a reader looking for a
+    /// privilege escalation that never happened.
+    #[error("facet `{facet}` is present but does not parse as its declared type: {detail}")]
+    FacetUnreadable { facet: &'static str, detail: String },
 }
 
 impl Manifest {
@@ -256,15 +263,18 @@ impl Manifest {
     /// `None` means absent; `Some(Err(_))` means present but not
     /// parseable as `F` — a distinction worth keeping, because the
     /// second is a misconfiguration and the first is not.
+    ///
+    /// The error is [`ManifestError::FacetUnreadable`], never
+    /// [`ManifestError::Facet`]: reading a facet is not a narrowing
+    /// check, and an operator who typed the JSON wrong should not be
+    /// told their manifest widened.
     pub fn facet<F: Facet + serde::de::DeserializeOwned>(
         &self,
     ) -> Option<Result<F, ManifestError>> {
         self.facets.get(F::NAME).map(|v| {
-            serde_json::from_value(v.clone()).map_err(|e| {
-                ManifestError::Facet(FacetError::new(
-                    F::NAME,
-                    format!("does not parse as this facet: {e}"),
-                ))
+            serde_json::from_value(v.clone()).map_err(|e| ManifestError::FacetUnreadable {
+                facet: F::NAME,
+                detail: e.to_string(),
             })
         })
     }
@@ -704,6 +714,27 @@ mod tests {
         let back = Manifest::from_json(&with.to_json().unwrap()).unwrap();
         assert_eq!(back, with);
         assert_eq!(back.content_id(), with.content_id());
+    }
+
+    /// A facet nobody can parse is a misconfiguration, and must not be
+    /// reported as a privilege escalation. The two send a reader to
+    /// different places: one to the JSON they typed, the other to
+    /// whoever handed them the manifest.
+    #[test]
+    fn an_unparseable_facet_is_not_reported_as_a_widening() {
+        let mut m = base();
+        m.facets
+            .insert("test".into(), serde_json::json!({ "allow": "not-a-list" }));
+
+        let err = m.facet::<TestFacet>().expect("present").unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::FacetUnreadable { facet, .. } if *facet == "test"),
+            "expected FacetUnreadable, got {err:?}"
+        );
+        assert!(
+            !err.to_string().contains("widen"),
+            "a parse failure must not claim the manifest widened: {err}"
+        );
     }
 
     /// With a validator registered, the facet's own rule decides.
