@@ -8,6 +8,23 @@
 //!
 //! The default posture is *legible history*: every mediated decision —
 //! allowed or denied — is recorded before its effect runs.
+//!
+//! # What the chain does and does not prove
+//!
+//! [`Chain::verify`] catches an edited payload, a reordered entry, and a
+//! deletion from anywhere but the end. It does **not** catch truncation
+//! of the tail: a prefix of a valid chain is itself a valid chain, and
+//! nothing inside the log proves that a further entry once followed.
+//! Nor does it stop a holder who recomputes every hash after an edit —
+//! the hashes are derived, not signed.
+//!
+//! Both gaps close the same way, and neither is cryptographic: commit to
+//! the head somewhere the log'"'"'s holder does not control. lex-os'"'"'s answer
+//! is positional — the log lives outside the box, owned by the supervisor
+//! the agent cannot reach — so the party who could truncate it is the
+//! party being protected, not the one being audited. A consumer that
+//! *does* need to distrust the holder must publish or countersign the
+//! head; see `Chain::head`.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -243,8 +260,13 @@ impl<E: ChainPayload> Chain<E> {
 
     /// Verify the entire chain: sequence numbers are contiguous, each
     /// entry's `prev_hash` matches its predecessor's hash, and every
-    /// stored hash matches a fresh recomputation. Any tampering — an
-    /// edited payload, a removed or reordered entry — is detected here.
+    /// stored hash matches a fresh recomputation. An edited payload, a
+    /// reordered entry, or a deletion from anywhere but the end is
+    /// detected here.
+    ///
+    /// Truncating the *tail* is not, and cannot be: the remaining prefix
+    /// is a well-formed chain. See the module docs for why lex-os treats
+    /// that as acceptable and what a consumer who cannot must do.
     pub fn verify(&self) -> Result<(), AuditError> {
         let mut expected_prev = GENESIS.to_string();
         for (i, entry) in self.entries.iter().enumerate() {
@@ -367,6 +389,38 @@ mod tests {
         let mut truncated = chain.clone();
         truncated.entries.remove(0);
         assert!(truncated.verify().is_err());
+    }
+
+    /// Tail truncation is the chain's known limit, pinned so nobody
+    /// later reads `verify` as proving more than it does: a prefix of a
+    /// valid chain verifies, because nothing inside the log says another
+    /// entry once followed. Deletion from the middle IS caught (the test
+    /// above), which is the distinction that matters when reasoning about
+    /// what an audit log is worth.
+    #[test]
+    fn tail_truncation_is_not_detected() {
+        let mut log = AuditLog::new();
+        log.append(Event::CommandAllowed {
+            command: "read report.md".into(),
+        });
+        log.append(Event::CommandDenied {
+            command: "curl evil.com".into(),
+            reason: "perimeter".into(),
+        });
+        log.verify().expect("the full chain verifies");
+
+        // Drop the denial — the embarrassing entry is always the last one.
+        let mut truncated = log.clone();
+        truncated.entries.pop();
+        assert_eq!(truncated.len(), 1);
+        assert!(
+            truncated.verify().is_ok(),
+            "a truncated prefix still verifies — this is the documented limit, \
+             not a regression; the mitigation is an external commitment to the head"
+        );
+
+        // The head is what changes, which is why it is the thing to publish.
+        assert_ne!(log.head(), truncated.head());
     }
 
     /// Domain separation: identical bytes under a different payload type
