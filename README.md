@@ -410,11 +410,13 @@ Both are optional, not required — each runs fully without lex-os today. See
 [lex-lang's ecosystem model](https://github.com/alpibrusl/lex-lang/blob/main/docs/design/ecosystem-model.md)
 for the full picture across all four repos.
 
-Two further consumers are proposed rather than built: `lex-infra` (a gate
-between `terraform plan` and `terraform apply`) and `lex-k8s` (a Kubernetes
-admission wall plus a RuntimeClass shim). Both are downstream repos reusing
-the manifest, the narrowing wall, the audit chain and the attestation graph;
-what they need from *this* workspace, and in what order, is recorded in
+Two further consumers are scaffolded but not built:
+[lex-iac](https://github.com/alpibrusl/lex-iac) (a gate between `terraform
+plan` and `terraform apply`) and
+[lex-k8s](https://github.com/alpibrusl/lex-k8s) (a Kubernetes admission wall
+plus a RuntimeClass shim). Both are downstream repos reusing the manifest, the
+narrowing wall, the audit chain and the attestation graph; what they need from
+*this* workspace, and in what order, is recorded in
 [`docs/design/plan-gates.md`](docs/design/plan-gates.md).
 
 ## The reversibility classification

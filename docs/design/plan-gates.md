@@ -1,10 +1,10 @@
-# Plan gates: where `lex-infra` and `lex-k8s` live
+# Plan gates: where `lex-iac` and `lex-k8s` live
 
 **Status:** accepted (architecture decision; no code yet)
 **Date:** 2026-09-06
 **Scope:** lex-os, lex-lang, plus two proposed downstream repos
 
-Two proposals — `lex-infra` (a gate between `terraform plan` and
+Two proposals — `lex-iac` (a gate between `terraform plan` and
 `terraform apply`) and `lex-k8s` (an admission webhook plus a
 RuntimeClass shim) — both claim to "reuse `lex-os-manifest`, the
 narrowing wall, the audit log and the attestation graph almost
@@ -14,13 +14,13 @@ what order to build them.
 
 ## Decision
 
-1. **`lex-infra` is a new repo**, and is built first.
+1. **`lex-iac` is a new repo**, and is built first.
 2. **`lex-k8s` is a new repo too, but it is two projects.** Its
-   admission wall (seam 1) is the same gate as `lex-infra` with a
+   admission wall (seam 1) is the same gate as `lex-iac` with a
    different frontend and belongs in that new repo. Its containerd shim
    (seam 2) is not a gate at all — it is a second consumer of
    `lex-os-perimeter` and belongs **here**, as a future `lex-os-shim`
-   crate. Neither starts until `lex-infra` has shipped.
+   crate. Neither starts until `lex-iac` has shipped.
 3. **Both depend on shared work in this workspace** that does not exist
    yet: manifest *facets* with a narrowing rule, an audit chain that is
    generic over its event vocabulary, and the gate ordering extracted
@@ -30,7 +30,7 @@ what order to build them.
 
 ## Why they are not crates in this workspace
 
-`lex-infra` touches none of the runtime half of lex-os — no perimeter,
+`lex-iac` touches none of the runtime half of lex-os — no perimeter,
 no supervisor, no guest, no proto, no capsule. It is a pure consumer of
 manifest + audit + attestation. What it *does* bring is a
 Terraform/OpenTofu plan-JSON model, a stateful-resource table and a cost
@@ -108,7 +108,7 @@ constrains its shape:
 
 The k8s facets pass this test as written (`secrets` and `egress` are
 allow-lists; `privileged` and `hostPath` are ordered booleans). The
-`lex-infra` facet does not, because of `deny`.
+`lex-iac` facet does not, because of `deny`.
 
 ## The abstraction both proposals are circling
 
@@ -120,7 +120,7 @@ artifact → effect rows → facet-grant check → reversibility → budget
 ```
 
 - `lex-os-check` is that pipeline for **Lex source**.
-- `lex-infra` is that pipeline for **plan JSON**.
+- `lex-iac` is that pipeline for **plan JSON**.
 - `lex-k8s-admission` is that pipeline for a **PodSpec**.
 
 That shared spine belongs here, as a `lex-os-gate` crate, consumed by
@@ -148,7 +148,7 @@ extracting it must preserve it exactly.
    (`crates/lex-cli/src/attest.rs`) almost line for line. The loop it
    closes is the existing one: apply → attestation → earned trust →
    keyring → next apply.
-3. **`lex-infra` repo.** Plan-JSON → effect-rows compiler, the
+3. **`lex-iac` repo.** Plan-JSON → effect-rows compiler, the
    stateful-resource table, the CLI, fixtures. Demoable with no cloud
    account.
 4. **`lex-k8s` repo.** Same spine, new frontend (PodSpec + NetworkPolicy
@@ -160,11 +160,11 @@ extracting it must preserve it exactly.
 Steps 1 and 2 are small and testable in this workspace. Step 3 is the
 first thing that demos.
 
-### Why `lex-infra` goes before `lex-k8s`
+### Why `lex-iac` goes before `lex-k8s`
 
-`lex-infra` milestone 2 needs a JSON fixture. `lex-k8s` milestone 2 needs
+`lex-iac` milestone 2 needs a JSON fixture. `lex-k8s` milestone 2 needs
 a cluster, a CRD, certificate plumbing and a Kubernetes client library.
-And because seam 1 and `lex-infra` are the *same gate*, building them
+And because seam 1 and `lex-iac` are the *same gate*, building them
 concurrently means factoring the shared spine from one example while
 guessing at the other. Build one, then generalise against a second real
 frontend.
@@ -174,7 +174,7 @@ frontend.
 Both were written against an idealised manifest. Before either becomes a
 spec:
 
-1. **The manifest JSON in the `lex-infra` proposal is not the real
+1. **The manifest JSON in the `lex-iac` proposal is not the real
    shape.** `Manifest` serialises as `{goal: {description, done_signal},
    grant: {filesystem, network, exec}, budget: {wall_clock_secs,
    max_commands, max_money_cents, max_api_calls}, isolation_floor,
@@ -190,7 +190,7 @@ spec:
 The proposals' own honest cautions stand, and two more belong with them:
 
 - A gate is exactly as safe as its input is honest. A provider that
-  mutates outside its declared plan is invisible to `lex-infra`; a node
+  mutates outside its declared plan is invisible to `lex-iac`; a node
   that acts outside the PodSpec is invisible to the admission wall. In
   both cases the perimeter — in-box apply, or the RuntimeClass — is what
   bounds the rest, and in both cases it is the last milestone, not the
