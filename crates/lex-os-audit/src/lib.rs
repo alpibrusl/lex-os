@@ -9,7 +9,7 @@
 //! The default posture is *legible history*: every mediated decision —
 //! allowed or denied — is recorded before its effect runs.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The genesis hash that the first entry chains from. A fixed,
@@ -117,23 +117,48 @@ pub enum Event {
     SessionEnded { outcome: String },
 }
 
+/// What a [`Chain`] can carry (lex-os#67).
+///
+/// The tamper-evidence — each entry committing to its predecessor's hash
+/// from a fixed [`GENESIS`], with [`Chain::verify`] catching any edit,
+/// reorder or deletion — is domain-neutral and worth reusing. The
+/// *vocabulary* is not: [`Event`] is the supervisor's mediation model and
+/// has no business learning what Terraform or Kubernetes are. So a
+/// downstream gate instantiates the chain with its own payload and gets
+/// the same guarantees, while lex-os keeps its own closed enum.
+///
+/// `DOMAIN` is the hash's domain separator. Each payload type must pick
+/// its own, so an entry from one vocabulary can never be replayed as an
+/// entry in another. [`Event`]'s is fixed forever at `lex.os.audit.v1`:
+/// changing it would invalidate every audit log ever written.
+pub trait ChainPayload: Serialize + DeserializeOwned {
+    const DOMAIN: &'static [u8];
+}
+
+impl ChainPayload for Event {
+    const DOMAIN: &'static [u8] = b"lex.os.audit.v1";
+}
+
 /// One link in the chain: a sequence number, the previous entry's hash,
 /// the event, and this entry's own hash over all of the above.
+///
+/// Generic over the payload, defaulting to [`Event`] so the supervisor's
+/// `Entry` keeps its unparameterised spelling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Entry {
+pub struct Entry<E = Event> {
     pub seq: u64,
     pub prev_hash: String,
-    pub event: Event,
+    pub event: E,
     pub hash: String,
 }
 
-impl Entry {
+impl<E: ChainPayload> Entry<E> {
     /// Recompute the hash this entry *should* have from its contents.
     /// Hashing the canonical JSON of the event keeps it stable.
-    fn compute_hash(seq: u64, prev_hash: &str, event: &Event) -> String {
+    fn compute_hash(seq: u64, prev_hash: &str, event: &E) -> String {
         let event_json = serde_json::to_string(event).expect("event is serializable");
         let mut hasher = Sha256::new();
-        hasher.update(b"lex.os.audit.v1");
+        hasher.update(E::DOMAIN);
         hasher.update(seq.to_be_bytes());
         hasher.update(prev_hash.as_bytes());
         hasher.update(event_json.as_bytes());
@@ -151,12 +176,30 @@ pub enum AuditError {
 
 /// An append-only, hash-chained log. Conceptually owned by the
 /// supervisor and persisted to external storage the box cannot reach.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AuditLog {
-    entries: Vec<Entry>,
+///
+/// Generic over its payload (lex-os#67); [`AuditLog`] is the
+/// supervisor's instantiation over [`Event`]. Append-only is a property
+/// of the chain, not of any one vocabulary: no instantiation gets an
+/// edit or truncate API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chain<E = Event> {
+    entries: Vec<Entry<E>>,
 }
 
-impl AuditLog {
+/// The supervisor's audit log: a [`Chain`] of [`Event`].
+pub type AuditLog = Chain<Event>;
+
+// Hand-written rather than derived: a chain of any payload starts empty,
+// whether or not the payload itself is `Default`.
+impl<E> Default for Chain<E> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<E: ChainPayload> Chain<E> {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -179,13 +222,13 @@ impl AuditLog {
         self.entries.is_empty()
     }
 
-    pub fn entries(&self) -> &[Entry] {
+    pub fn entries(&self) -> &[Entry<E>] {
         &self.entries
     }
 
     /// Append an event, chaining it to the current head. Returns the new
     /// head hash. This is the only way to grow the log.
-    pub fn append(&mut self, event: Event) -> String {
+    pub fn append(&mut self, event: E) -> String {
         let seq = self.entries.len() as u64;
         let prev_hash = self.head();
         let hash = Entry::compute_hash(seq, &prev_hash, &event);
@@ -248,7 +291,7 @@ impl AuditLog {
     }
 
     pub fn from_json(s: &str) -> Result<Self, AuditError> {
-        let entries: Vec<Entry> = serde_json::from_str(s)?;
+        let entries: Vec<Entry<E>> = serde_json::from_str(s)?;
         Ok(Self { entries })
     }
 }
@@ -256,6 +299,133 @@ impl AuditLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Generic chain (lex-os#67) -----------------------------------
+
+    /// A downstream gate's vocabulary. lex-os knows nothing about plan
+    /// artifacts; this exists to prove the chain does not need to.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum PlanEvent {
+        PlanRequested { artifact_sha256: String },
+        PlanRefused { effect: String, reason: String },
+    }
+
+    impl ChainPayload for PlanEvent {
+        const DOMAIN: &'static [u8] = b"test.plan.v1";
+    }
+
+    /// The whole point of #67: a second payload gets the same
+    /// tamper-evidence with no change to `Event`.
+    #[test]
+    fn chain_carries_a_foreign_payload() {
+        let mut chain: Chain<PlanEvent> = Chain::new();
+        assert_eq!(chain.head(), GENESIS);
+        chain.append(PlanEvent::PlanRequested {
+            artifact_sha256: "abc".into(),
+        });
+        chain.append(PlanEvent::PlanRefused {
+            effect: "aws.rds.delete".into(),
+            reason: "outside grant".into(),
+        });
+        assert_eq!(chain.len(), 2);
+        chain.verify().expect("a well-formed chain verifies");
+
+        // Round-trips through the same array-of-entries wire format.
+        let json = chain.to_json().unwrap();
+        let back = Chain::<PlanEvent>::from_json(&json).unwrap();
+        assert_eq!(back.entries(), chain.entries());
+        back.verify().unwrap();
+    }
+
+    /// Tamper-evidence is a property of the chain, so it holds for any
+    /// payload — not just the one lex-os ships.
+    #[test]
+    fn foreign_payload_tampering_is_still_caught() {
+        let mut chain: Chain<PlanEvent> = Chain::new();
+        chain.append(PlanEvent::PlanRequested {
+            artifact_sha256: "abc".into(),
+        });
+        chain.append(PlanEvent::PlanRefused {
+            effect: "aws.rds.delete".into(),
+            reason: "outside grant".into(),
+        });
+
+        // Rewrite a refusal into something innocuous, as a gate that
+        // wanted to hide a denial would.
+        let mut tampered = chain.clone();
+        tampered.entries[1].event = PlanEvent::PlanRefused {
+            effect: "aws.logs.read".into(),
+            reason: "outside grant".into(),
+        };
+        assert!(matches!(
+            tampered.verify().unwrap_err(),
+            AuditError::Broken { seq: 1, .. }
+        ));
+
+        // Dropping the denial entirely breaks the chain at the seam.
+        let mut truncated = chain.clone();
+        truncated.entries.remove(0);
+        assert!(truncated.verify().is_err());
+    }
+
+    /// Domain separation: identical bytes under a different payload type
+    /// hash differently, so an entry from one vocabulary can never be
+    /// replayed into another's chain.
+    #[test]
+    fn payload_domains_are_separated() {
+        #[derive(Serialize, Deserialize)]
+        struct Same(String);
+        impl ChainPayload for Same {
+            const DOMAIN: &'static [u8] = b"test.same.v1";
+        }
+        #[derive(Serialize, Deserialize)]
+        struct Other(String);
+        impl ChainPayload for Other {
+            const DOMAIN: &'static [u8] = b"test.other.v1";
+        }
+
+        let a = Entry::<Same>::compute_hash(0, GENESIS, &Same("x".into()));
+        let b = Entry::<Other>::compute_hash(0, GENESIS, &Other("x".into()));
+        assert_ne!(a, b, "different domains must not collide on equal bodies");
+    }
+
+    /// Golden fixture. `lex attest import-install` (lex-lang) parses these
+    /// logs as a JSON array and keys on `event.kind`, and `lex-os audit
+    /// verify` must keep accepting logs written by older versions — so
+    /// both the wire shape and the hashes are frozen here. If making the
+    /// chain generic had perturbed either, this fails.
+    #[test]
+    fn event_wire_format_and_hashes_are_frozen() {
+        let mut log = AuditLog::new();
+        log.append(Event::Provisioned {
+            manifest_id: "m".into(),
+            backend: "simulated".into(),
+            reprovision: false,
+        });
+        log.append(Event::CommandDenied {
+            command: "curl evil.com".into(),
+            reason: "perimeter".into(),
+        });
+
+        assert_eq!(
+            log.entries()[0].hash,
+            "fb395143df9e0e4da7b221ababda66496331256a2d2213aa70648726942ed3da"
+        );
+        assert_eq!(
+            log.head(),
+            "1d05861fbe92c0af3b1f1db2c4fa07e3e91ee6b90756088d070e15ac0b2391af"
+        );
+
+        // The exact JSON an importer sees: a flat array, `kind`-tagged
+        // events, snake_case field names.
+        let parsed: serde_json::Value = serde_json::from_str(&log.to_json().unwrap()).unwrap();
+        let entries = parsed.as_array().expect("a JSON array of entries");
+        assert_eq!(entries[0]["event"]["kind"], "provisioned");
+        assert_eq!(entries[0]["event"]["manifest_id"], "m");
+        assert_eq!(entries[1]["event"]["kind"], "command_denied");
+        assert_eq!(entries[1]["prev_hash"], entries[0]["hash"]);
+    }
 
     #[test]
     fn empty_log_head_is_genesis() {

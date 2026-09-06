@@ -24,7 +24,10 @@ set its own limits, stop.
   `EscalationGrant` (#60): a human-signed, strictly-widening delta bound
   to a single command — the manifest itself never mutates.
 - `crates/lex-os-audit` — hash-chained tamper-evident log. Append-only;
-  never add an "edit" or "truncate" API.
+  never add an "edit" or "truncate" API. `Chain<E>` is generic over its
+  payload (`AuditLog = Chain<Event>`) so a downstream gate reuses the
+  chain without lex-os learning its vocabulary; each payload picks its
+  own hash domain, and `Event`'s is frozen at `lex.os.audit.v1`.
 - `crates/lex-os-perimeter` — `SandboxPolicy::from_grant` is the single
   grant→OS-policy mapping. New backends implement the `Perimeter` trait.
 - `crates/lex-os-resolver` — *refuse, don't downgrade*. Every new failure
