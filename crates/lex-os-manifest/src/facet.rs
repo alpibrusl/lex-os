@@ -28,7 +28,10 @@
 //! only ever add. Encoding that here — rather than leaving it to each
 //! facet's author — is the point of this module.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+
+use serde::{de::DeserializeOwned, Serialize};
 
 /// Why a child manifest's facet was refused. Carries the facet name and a
 /// human-legible reason so the supervisor can log a `[BLOCKED:narrowing]`
@@ -36,14 +39,22 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("facet `{facet}` widens: {detail} (a child manifest may only narrow)")]
 pub struct FacetError {
-    pub facet: &'static str,
+    /// The facet's name.
+    ///
+    /// `Cow` rather than `&'static str` because a facet name can arrive
+    /// from a manifest's JSON, not only from a `Facet::NAME` constant.
+    /// The borrowed case — every typed facet — still costs nothing; only
+    /// a name read from input allocates. Interning those instead would
+    /// leak once per distinct name, and manifests are external input, so
+    /// a hostile one could leak without bound.
+    pub facet: Cow<'static, str>,
     pub detail: String,
 }
 
 impl FacetError {
-    pub fn new(facet: &'static str, detail: impl Into<String>) -> Self {
+    pub fn new(facet: impl Into<Cow<'static, str>>, detail: impl Into<String>) -> Self {
         Self {
-            facet,
+            facet: facet.into(),
             detail: detail.into(),
         }
     }
@@ -61,6 +72,102 @@ pub trait Facet: Sized {
 
     /// Refuse if `child` grants any authority `parent` does not.
     fn validate_narrowing(parent: &Self, child: &Self) -> Result<(), FacetError>;
+}
+
+/// A validator for one facet, over its serialised form.
+///
+/// The slot on [`Manifest`](crate::Manifest) is type-erased — that is
+/// the point, since lex-os must not learn what Terraform or Kubernetes
+/// are — so narrowing a facet it does not know needs the *consumer* to
+/// supply the decision procedure.
+pub type FacetValidator = fn(&serde_json::Value, &serde_json::Value) -> Result<(), FacetError>;
+
+/// Rebuild a typed facet from both sides and delegate to its own rule.
+fn typed_validator<F: Facet + DeserializeOwned>(
+    parent: &serde_json::Value,
+    child: &serde_json::Value,
+) -> Result<(), FacetError> {
+    let parent: F = serde_json::from_value(parent.clone())
+        .map_err(|e| FacetError::new(F::NAME, format!("parent facet does not parse: {e}")))?;
+    let child: F = serde_json::from_value(child.clone())
+        .map_err(|e| FacetError::new(F::NAME, format!("child facet does not parse: {e}")))?;
+    F::validate_narrowing(&parent, &child)
+}
+
+/// Which facets a narrowing check knows how to compare.
+///
+/// A facet that is **not** registered is not thereby waved through: the
+/// wall requires it to be byte-identical between parent and child, so it
+/// can be carried or dropped but never tightened-in-a-way-nobody-checked
+/// and never widened. Refuse, don't downgrade — applied to the gap in
+/// our own knowledge rather than to the input.
+#[derive(Default, Clone)]
+pub struct FacetRegistry {
+    validators: BTreeMap<&'static str, FacetValidator>,
+}
+
+impl FacetRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Teach the registry how to narrow `F`.
+    pub fn with<F: Facet + DeserializeOwned>(mut self) -> Self {
+        self.validators.insert(F::NAME, typed_validator::<F>);
+        self
+    }
+
+    pub fn get(&self, name: &str) -> Option<FacetValidator> {
+        self.validators.get(name).copied()
+    }
+
+    pub fn knows(&self, name: &str) -> bool {
+        self.validators.contains_key(name)
+    }
+}
+
+/// Narrow the type-erased facet slot.
+///
+/// Three rules, in the order they matter:
+///
+/// 1. A facet key in the child that the parent does not carry is
+///    refused — authority cannot appear from nowhere. (Same asymmetry as
+///    [`validate_optional`].)
+/// 2. A registered facet is delegated to its own rule.
+/// 3. An unregistered facet must be byte-identical. Anything else would
+///    mean accepting a change we have no procedure to judge.
+pub fn validate_slot(
+    parent: &BTreeMap<String, serde_json::Value>,
+    child: &BTreeMap<String, serde_json::Value>,
+    registry: &FacetRegistry,
+) -> Result<(), FacetError> {
+    for (name, child_value) in child {
+        let Some(parent_value) = parent.get(name) else {
+            return Err(FacetError::new(
+                name.clone(),
+                "the parent manifest carries no such facet, so a child cannot claim one",
+            ));
+        };
+        match registry.get(name) {
+            Some(validate) => validate(parent_value, child_value)?,
+            None if parent_value == child_value => {}
+            None => {
+                return Err(FacetError::new(
+                    name.clone(),
+                    "facet differs from the parent's and no validator is registered for it, \
+                     so the narrowing cannot be checked — register one, or carry the \
+                     parent's value unchanged",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Serialise a facet for storage in the slot.
+pub fn to_value<F: Facet + Serialize>(facet: &F) -> Result<serde_json::Value, FacetError> {
+    serde_json::to_value(facet)
+        .map_err(|e| FacetError::new(F::NAME, format!("facet does not serialise: {e}")))
 }
 
 /// Narrowing over an *optional* facet, which is how facets sit on a
