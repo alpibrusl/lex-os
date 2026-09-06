@@ -1,7 +1,7 @@
 [package]
 name    = "lex-os-manifest"
 version = "0.1.0"
-lex     = "0.10.15"
+lex     = "0.10.16"
 
 # The manifest format lives here as a Lex package rather than its own
 # repo (design doc §11): trust dimensions, grants, narrowing-inheritance
