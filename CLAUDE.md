@@ -22,7 +22,13 @@ set its own limits, stop.
 - `crates/lex-os-manifest` — manifest, grant, budget, reversibility,
   isolation floor. Content-addressable. Also the one-shot
   `EscalationGrant` (#60): a human-signed, strictly-widening delta bound
-  to a single command — the manifest itself never mutates.
+  to a single command — the manifest itself never mutates. Authority
+  domains outside the trust lattice are **facets** (#66, #71): `Actuation`
+  is concrete because lex-os mediates skills itself, while a downstream
+  gate's domain lives type-erased in `Manifest::facets` and narrows
+  through a `FacetRegistry` the consumer supplies. An *unregistered*
+  facet must be byte-identical between parent and child — safe, not
+  permissive.
 - `crates/lex-os-audit` — hash-chained tamper-evident log. Append-only;
   never add an "edit" or "truncate" API. `Chain<E>` is generic over its
   payload (`AuditLog = Chain<Event>`) so a downstream gate reuses the
