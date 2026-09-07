@@ -25,8 +25,9 @@ pub fn guest_connect() -> anyhow::Result<StreamGuestTransport<BufReader<File>, F
 /// serial console as a *non-blocking* fd; a burst of logging then makes
 /// `write(2)` return `EAGAIN`, which Rust's `print!`/`eprintln!` turn into a
 /// hard panic ("failed printing to stderr: Resource temporarily unavailable").
-/// Making the console block (the host drains ttyS0 via inherited stdio) keeps
-/// guest logging reliable. Best-effort: failures are ignored.
+/// Making the console block (the host drains the guest serial console via
+/// inherited stdio) keeps guest logging reliable. Best-effort: failures
+/// are ignored.
 pub fn make_stdio_blocking() {
     for fd in 0..=2 {
         // SAFETY: F_GETFL/F_SETFL on the standard fds; no memory is touched.

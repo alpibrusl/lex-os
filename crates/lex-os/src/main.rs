@@ -917,7 +917,7 @@ fn run_guest_in_vm(
     guest_script: Option<String>,
     jail: Option<lex_os_perimeter::JailConfig>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
-    use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
+    use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter, GUEST_CONSOLE};
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
 
     let ollama_host = ollama_url
@@ -939,7 +939,7 @@ fn run_guest_in_vm(
     };
     let assets = FirecrackerAssets {
         boot_args: format!(
-            "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.agent \
+            "console={GUEST_CONSOLE} reboot=k panic=1 pci=off init=/sbin/init.agent \
              ollama_host={ollama_host} ollama_model={model_name}{script_arg}"
         ),
         jail: jail.clone(),
@@ -1080,12 +1080,13 @@ fn run_exec_in_vm(
     env: &lex_os_resolver::Environment,
     jail: Option<lex_os_perimeter::JailConfig>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
-    use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
+    use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter, GUEST_CONSOLE};
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
 
     let assets = FirecrackerAssets {
         boot_args: format!(
-            "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.agent guest_script={}",
+            "console={} reboot=k panic=1 pci=off init=/sbin/init.agent guest_script={}",
+            GUEST_CONSOLE,
             exec::GUEST_SCRIPT
         ),
         jail: jail.clone(),

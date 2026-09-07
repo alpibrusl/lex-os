@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "firecracker")]
 mod firecracker;
 #[cfg(feature = "firecracker")]
-pub use firecracker::{FirecrackerAssets, FirecrackerPerimeter, JailConfig};
+pub use firecracker::{FirecrackerAssets, FirecrackerPerimeter, JailConfig, GUEST_CONSOLE};
 
 /// Network posture derived from the network trust level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

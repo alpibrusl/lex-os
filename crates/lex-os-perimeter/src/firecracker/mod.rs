@@ -35,6 +35,9 @@ pub struct FirecrackerAssets {
     /// script (`init=/sbin/init.demo`, injected into the rootfs by
     /// `demo/setup-assets.sh`); a real agent run overrides this via
     /// [`FirecrackerPerimeter::with_assets`].
+    ///
+    /// A caller building its own must use [`GUEST_CONSOLE`] rather than
+    /// spelling `ttyS0`, or the guest will be silent on ARM.
     pub boot_args: String,
     /// Host UDS base path for the guest↔supervisor vsock channel. Firecracker
     /// connects to `${socket_vsock}_${port}` when the guest opens a vsock
@@ -50,6 +53,21 @@ pub struct FirecrackerAssets {
     pub jail: Option<JailConfig>,
 }
 
+/// The guest's serial console device, which is not the same on every
+/// architecture: Firecracker gives x86 guests an 8250 UART (`ttyS0`) and
+/// ARM guests a PL011 (`ttyAMA0`). Boot with the wrong one and the VM
+/// comes up mute — no panic, no error, just a console nobody is
+/// listening to, which is a miserable thing to debug.
+///
+/// Keyed on the **host** architecture on purpose. Firecracker does not
+/// emulate a foreign ISA, so the guest is always the architecture this
+/// binary was built for.
+#[cfg(target_arch = "aarch64")]
+pub const GUEST_CONSOLE: &str = "ttyAMA0";
+/// See the `aarch64` variant above.
+#[cfg(not(target_arch = "aarch64"))]
+pub const GUEST_CONSOLE: &str = "ttyS0";
+
 impl Default for FirecrackerAssets {
     fn default() -> Self {
         Self {
@@ -58,7 +76,9 @@ impl Default for FirecrackerAssets {
             socket: PathBuf::from("/tmp/firecracker-lex-os.sock"),
             tap: "tap-lex0".into(),
             host_ip_cidr: "169.254.42.1/30".into(),
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init.demo".into(),
+            boot_args: format!(
+                "console={GUEST_CONSOLE} reboot=k panic=1 pci=off init=/sbin/init.demo"
+            ),
             socket_vsock: PathBuf::from("/tmp/firecracker-lex-os-vsock.sock"),
             guest_cid: 3,
             jail: None,
@@ -415,6 +435,46 @@ fn stage_jail_assets(
 mod tests {
     use super::*;
     use lex_os_manifest::{Grant, Level};
+
+    /// The console device must match the architecture this binary was
+    /// built for. Firecracker gives x86 guests an 8250 UART and ARM
+    /// guests a PL011; boot with the wrong one and the VM comes up
+    /// **mute** — no panic, no error, just a console nobody is listening
+    /// to. A silent failure is exactly the kind worth pinning rather
+    /// than describing in a comment.
+    #[test]
+    fn the_console_matches_the_architecture() {
+        let expected = if cfg!(target_arch = "aarch64") {
+            "ttyAMA0"
+        } else {
+            "ttyS0"
+        };
+        assert_eq!(GUEST_CONSOLE, expected);
+    }
+
+    /// Whatever the architecture, the default command line has to carry
+    /// the console the guest will actually use — and not the other one.
+    /// A `cfg` edited on one side only would leave these disagreeing.
+    #[test]
+    fn the_default_boot_args_use_that_console() {
+        let assets = FirecrackerAssets::default();
+        assert!(
+            assets
+                .boot_args
+                .contains(&format!("console={GUEST_CONSOLE}")),
+            "boot_args {:?} does not name {GUEST_CONSOLE}",
+            assets.boot_args
+        );
+        let wrong = if GUEST_CONSOLE == "ttyS0" {
+            "ttyAMA0"
+        } else {
+            "ttyS0"
+        };
+        assert!(
+            !assets.boot_args.contains(wrong),
+            "boot_args names the other architecture's console"
+        );
+    }
 
     /// Full provision → check → destroy cycle on the simulated backend.
     /// This test is ignored by default because the real backend requires KVM.
