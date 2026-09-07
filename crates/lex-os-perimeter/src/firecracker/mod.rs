@@ -360,6 +360,30 @@ impl FirecrackerPerimeter {
                 .map_err(perimeter_err)?;
         }
 
+        // 6c. Entropy. A microVM boots with almost none, and Linux's
+        //      `getrandom(2)` blocks until the pool is *fully* seeded — not
+        //      merely "fast init done", which is all a bare box reaches.
+        //      Anything that wants randomness early therefore hangs: Go's
+        //      `crypto/rand` announces itself with "blocked for 60 seconds
+        //      waiting to read random data from the kernel" and every TLS
+        //      handshake stalls behind it.
+        //
+        //      This is not a workload's problem to solve. A box that cannot
+        //      produce a random number is not a box anything real runs in,
+        //      and the fix is a device the VMM has had for years.
+        //
+        //      Older Firecracker builds have no `/entropy`; treat a refusal
+        //      as a warning rather than a failed provision, so a host on an
+        //      older binary still boots — slowly, and audibly.
+        if let Err(e) = with_socket(&lay.api_sock_host, |s| {
+            put_json(s, "/entropy", r#"{}"#)
+        }) {
+            eprintln!(
+                "lex-os perimeter: this firecracker refused /entropy ({e}); the guest will \
+                 have little randomness and anything calling getrandom(2) early may block"
+            );
+        }
+
         // 7. Start the VM. Firecracker's /actions is a PUT (it has no POST).
         with_socket(&lay.api_sock_host, |s| {
             put_json(s, "/actions", r#"{"action_type":"InstanceStart"}"#)
