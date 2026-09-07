@@ -29,3 +29,24 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+      # The KVM gate's own regression test, run on ordinary CI because it
+      # needs no KVM — only saved output from runs that did.
+      #
+      # `wall2.sh` used to exit 0 whenever the box booted, so the nightly
+      # job stayed green through the entire life of #79 while the guest
+      # printed "UNEXPECTED" to a console nobody parsed. The decision now
+      # lives in demo/assert-wall.sh, which means it can be held to real
+      # logs here: one from a passing run, one captured from the broken
+      # wall itself, and one from a wall that refuses everything.
+      - name: The wall assertions catch what they exist to catch
+        run: |
+          set -e
+          bash demo/assert-wall.sh demo/fixtures/wall2-good.log
+          for bad in broken-79 all-drop; do
+            if bash demo/assert-wall.sh "demo/fixtures/wall2-$bad.log" 2>/dev/null; then
+              echo "assert-wall accepted demo/fixtures/wall2-$bad.log; it must not" >&2
+              exit 1
+            fi
+            echo "correctly refused: $bad"
+          done

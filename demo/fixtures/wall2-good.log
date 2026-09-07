@@ -1,0 +1,14 @@
+# Real output from a passing run, 2026-09-07, after #80.
+--- denied: host-local service NOT in the allowlist (INPUT fence) ---
+ -> blocked (host-local egress fenced)
+--- denied: named host outside the allowlist ---
+ -> blocked (no route)
+--- denied: raw IP, no DNS involved ---
+ -> blocked (no route)
+--- the egress wall, counted by the kernel (mangle/PREROUTING) ---
+Chain LEX_OS_EGRESS (1 references)
+num   pkts bytes target     prot opt in     out     source               destination
+1        4   304 RETURN     all  --  *      *       0.0.0.0/0            0.0.0.0/0            ctstate RELATED,ESTABLISHED
+2        1    60 RETURN     tcp  --  *      *       0.0.0.0/0            169.254.42.1         tcp dpt:443
+3       37 23055 DROP       all  --  *      *       0.0.0.0/0            0.0.0.0/0
+
