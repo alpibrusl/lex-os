@@ -10,23 +10,42 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/assets"
 
 FC_VERSION=v1.9.1
-FC_TGZ="firecracker-${FC_VERSION}-x86_64.tgz"
-FC_REL="release-${FC_VERSION}-x86_64"
-KERNEL_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
-ROOTFS_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4
+
+# Firecracker does not emulate a foreign ISA, so the guest architecture is
+# the host's. `uname -m` spells it the same way Firecracker's release
+# tarballs and the quickstart bucket do, which is why nothing is mapped
+# here — anything else is a host this script has never been run on, and
+# saying so beats fetching an x86 kernel onto an ARM box and watching a
+# microVM fail to boot for reasons nobody will guess.
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|aarch64) ;;
+  *)
+    echo "! unsupported architecture: $ARCH" >&2
+    echo "  Firecracker publishes x86_64 and aarch64 builds only." >&2
+    exit 1
+    ;;
+esac
+# The Rust target for the in-VM agent, which has no such convention.
+MUSL_TARGET="${ARCH}-unknown-linux-musl"
+
+FC_TGZ="firecracker-${FC_VERSION}-${ARCH}.tgz"
+FC_REL="release-${FC_VERSION}-${ARCH}"
+KERNEL_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/kernels/vmlinux.bin
+ROOTFS_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/rootfs/bionic.rootfs.ext4
 
 # 1. Firecracker + jailer binaries, staged in demo/assets/.
 if [ ! -x ./firecracker ]; then
-  echo "+ fetching firecracker $FC_VERSION"
+  echo "+ fetching firecracker $FC_VERSION ($ARCH)"
   curl -fsSL -o "$FC_TGZ" \
     "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/${FC_TGZ}"
-  # The tarball keeps everything under release-<ver>-x86_64/; extract just the
+  # The tarball keeps everything under release-<ver>-<arch>/; extract just the
   # two binaries we use (do NOT --strip-components, it breaks the paths below).
   tar xzf "$FC_TGZ" \
-    "${FC_REL}/firecracker-${FC_VERSION}-x86_64" \
-    "${FC_REL}/jailer-${FC_VERSION}-x86_64"
-  install -m 0755 "${FC_REL}/firecracker-${FC_VERSION}-x86_64" ./firecracker
-  install -m 0755 "${FC_REL}/jailer-${FC_VERSION}-x86_64"      ./jailer
+    "${FC_REL}/firecracker-${FC_VERSION}-${ARCH}" \
+    "${FC_REL}/jailer-${FC_VERSION}-${ARCH}"
+  install -m 0755 "${FC_REL}/firecracker-${FC_VERSION}-${ARCH}" ./firecracker
+  install -m 0755 "${FC_REL}/jailer-${FC_VERSION}-${ARCH}"      ./jailer
   rm -rf "$FC_REL" "$FC_TGZ"
 fi
 
@@ -59,15 +78,15 @@ fi
 #    it can be injected into the rootfs. Build as the invoking user — root has
 #    no rustup toolchain. Skipped if the musl target isn't installed.
 REPO_ROOT="$(cd ../.. && pwd)"
-GUEST_BIN="$REPO_ROOT/target/x86_64-unknown-linux-musl/release/lex-os-guest"
+GUEST_BIN="$REPO_ROOT/target/${MUSL_TARGET}/release/lex-os-guest"
 build_as=(cargo)
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
   build_as=(sudo -u "$SUDO_USER" -H -- cargo)
 fi
-echo "+ building static musl agent binary (lex-os-guest, --features vsock)"
+echo "+ building static musl agent binary (lex-os-guest, --features vsock, $MUSL_TARGET)"
 ( cd "$REPO_ROOT" && "${build_as[@]}" build --release \
-    --target x86_64-unknown-linux-musl -p lex-os-guest --features vsock ) \
-  || echo "! musl build failed (need: rustup target add x86_64-unknown-linux-musl); agent not injected"
+    --target "$MUSL_TARGET" -p lex-os-guest --features vsock ) \
+  || echo "! musl build failed (need: rustup target add $MUSL_TARGET); agent not injected"
 
 # 5. Inject the guest inits + agent binary into the rootfs. Needs root to
 #    loop-mount. /sbin/init.demo = attack-probe demo (init-attack.sh);
@@ -86,6 +105,6 @@ else
   echo "! skipping rootfs injection (needs root); re-run with sudo"
 fi
 
-echo "+ assets in $(pwd)"
+echo "+ assets in $(pwd) ($ARCH)"
 ls -lh firecracker jailer vmlinux rootfs.ext4
 ./firecracker --version | head -1

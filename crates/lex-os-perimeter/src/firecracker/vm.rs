@@ -48,7 +48,8 @@ impl FirecrackerVm {
         if Command::new(program).arg("--version").output().is_err() {
             return Err(VmError::MissingBinary);
         }
-        // Inherit stdout/stderr so the guest serial console (ttyS0 → firecracker
+        // Inherit stdout/stderr so the guest serial console (see
+        // `GUEST_CONSOLE`; ttyS0 on x86, ttyAMA0 on ARM → firecracker
         // stdout) streams live to the operator — that's where the Wall-2 egress
         // probes from init-attack.sh appear. (Folding the console into the audit
         // log is a follow-up; for now it must at least be visible.)

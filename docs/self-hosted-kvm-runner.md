@@ -30,6 +30,19 @@ usual networking tools. Nothing lex-os-specific beyond the `kvm` label.
 > not add `pull_request` to this workflow, and in **Settings → Actions → General**
 > require approval for outside collaborators.
 
+## Architecture
+
+**x86_64 and aarch64 both work.** `demo/setup-assets.sh` reads `uname -m` and
+fetches the matching Firecracker release and guest images; the perimeter picks
+the right serial console (`ttyS0` on x86, `ttyAMA0` on ARM — see `GUEST_CONSOLE`).
+Anything else is refused by name rather than fetched wrongly.
+
+That makes an ARM board a legitimate runner. A Raspberry Pi 5 has native KVM and
+its GIC-400 is a GICv2, which the pinned Firecracker still supports — so a board
+on a desk can stand in for a rented x86 server. It has not been run yet; the
+first host to try either architecture is also the first to validate the pin
+(#76).
+
 ## Prerequisites
 
 On the KVM host (the machine you've been running the demos on already satisfies
@@ -39,7 +52,7 @@ all of these). Verify:
 test -e /dev/kvm && echo "kvm ok"            # hardware virtualization present
 getent group kvm                              # the kvm group exists (gid used by the jailer)
 command -v cargo && cargo --version           # Rust toolchain (rustup recommended)
-rustup target add x86_64-unknown-linux-musl   # for the in-VM guest build (wall2 doesn't need it, agent demos do)
+rustup target add "$(uname -m)-unknown-linux-musl"   # in-VM guest build (wall2 doesn't need it; agent demos do)
 command -v ip iptables curl tar               # iproute2 / iptables / curl / tar
 ```
 
@@ -129,7 +142,7 @@ booted with the egress wall holding — the gate for flipping the default is met
 | `/dev/kvm: permission denied` / boot fails | Host virtualization off in BIOS, or `/dev/kvm` missing. Confirm `test -e /dev/kvm` and `grep -E 'vmx|svm' /proc/cpuinfo`. |
 | jailer: `cgroup ... already exists` / cgroup errors | Stale jail from a killed run. `sudo rm -rf /srv/jailer/firecracker/*` and `sudo rmdir /sys/fs/cgroup/firecracker/* 2>/dev/null`. The host is cgroup v2 (the perimeter passes `--cgroup-version 2`). |
 | `ip tuntap add ... Device or resource busy` | A leftover `tap-lex0` from a crashed run. `sudo ip link delete tap-lex0`. |
-| musl build warning in setup-assets | `rustup target add x86_64-unknown-linux-musl`. Not needed for `wall2`, but the agent demos inject the guest binary. |
+| musl build warning in setup-assets | `rustup target add "$(uname -m)-unknown-linux-musl"`. Not needed for `wall2`, but the agent demos inject the guest binary. |
 | Runner offline for the nightly cron | Install it as a service (Step 3), not just `./run.sh`. |
 
 ## Then: flip the default (Task 3, code half)
