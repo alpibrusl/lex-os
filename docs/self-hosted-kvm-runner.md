@@ -144,6 +144,44 @@ gh run watch
 Green means: the real perimeter built, assets fetched, and a jailed microVM
 booted with the egress wall holding — the gate for flipping the default is met.
 
+## What "green" means, and what it used to mean
+
+The job asserts, it does not merely run. Until #54 `wall2.sh` exited 0
+whenever the microVM booted and tore down: the guest's probes printed to
+the console and nothing read them, so the nightly job stayed green
+through the entire life of the egress-wall bypass in #79, with
+`UNEXPECTED: host-local :8080 succeeded` on screen the whole time.
+
+`demo/assert-wall.sh` now decides, from the run's log:
+
+1. **No probe reached anything the grant does not allow** — the guest
+   says `UNEXPECTED`, and that word fails the job.
+2. **Every denial probe actually ran.** A guest that never booted far
+   enough to probe prints none of them, and three absences must not read
+   as three passes.
+3. **The wall discriminated.** This is the one that never existed. All
+   three denial probes pass just as well against a wall that refuses
+   *every* packet, so the denials alone say nothing about the allowlist.
+   The kernel's own counters settle it — RETURN rules carrying traffic
+   mean something was permitted, DROP carrying traffic means something
+   was refused, and both must hold.
+
+A passing run ends with, e.g.:
+
+```
+wall assertions passed: 5 packet(s) permitted, 40 refused
+```
+
+Both numbers matter. A zero on the left is a wall that let nothing
+through, which is not a working wall — it is a broken one that happens
+to pass every denial probe.
+
+Because that decision is a function of a log rather than of a live box,
+it is tested on ordinary CI with no `/dev/kvm`: `demo/fixtures/` carries
+a passing run, the real captured output of the broken wall, and an
+all-drop wall, and the `ci` workflow asserts the first passes and the
+other two are refused.
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |
@@ -155,7 +193,24 @@ booted with the egress wall holding — the gate for flipping the default is met
 | musl build warning in setup-assets | `rustup target add "$(uname -m)-unknown-linux-musl"`. Not needed for `wall2`, but the agent demos inject the guest binary. |
 | Runner offline for the nightly cron | Install it as a service (Step 3), not just `./run.sh`. |
 
-## Then: flip the default (Task 3, code half)
+## Do not add a `pull_request` trigger
+
+Said in the box at the top and worth repeating at the bottom, because it
+is the one change that would turn this runner into a liability.
+
+**lex-os is a public repository.** A `pull_request` trigger on a
+self-hosted runner lets anyone who forks the repo execute code on the
+runner host — which, per section 1, has passwordless sudo. lex-os#54 asks
+for this job to be a required PR check; that wording predates the runner
+existing and should not be followed literally on a persistent host you
+care about.
+
+Making it PR-blocking safely needs an **ephemeral, isolated** runner: a
+VM created per run and destroyed after, so there is no persistent host to
+compromise. That also solves the duller problem — a required check whose
+runner is asleep does not fail, it hangs, and blocks every merge.
+
+## Historical: flipping the default (Task 3, code half)
 
 Once this workflow is reliably green, the Firecracker backend can become the
 default: make `firecracker` a default cargo feature (or auto-select it when

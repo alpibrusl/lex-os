@@ -1,0 +1,14 @@
+{
+  "_comment": [
+    "Manifest for running lex-code as a mediated subprocess via `lex-os exec`.",
+    "network: Full is needed for lex-code to reach the local LiteLLM proxy;",
+    "exec: Sandboxed is what lets the real subprocess spawn at all."
+  ],
+  "goal": {
+    "description": "unused — overwritten by the exec spec"
+  },
+  "grant": { "filesystem": "ReadOnly", "network": "Full", "exec": "Sandboxed" },
+  "budget": { "wall_clock_secs": 400, "max_commands": 10, "max_money_cents": 0, "max_api_calls": 0 },
+  "isolation_floor": "MicroVm",
+  "egress": []
+}
