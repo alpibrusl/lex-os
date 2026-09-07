@@ -498,15 +498,7 @@ fn install(
         // effect it performs through the supervisor gate (not a stand-in built
         // from the declared effects).
         return run_in_box(
-            fmt,
-            start,
-            &installed,
-            &consumer,
-            &env,
-            audit,
-            &audit_out,
-            ep,
-            &source,
+            fmt, start, &installed, &consumer, &env, audit, &audit_out, ep, &source,
         );
     }
 
@@ -608,20 +600,30 @@ fn run_in_box(
     entrypoint: &str,
     source: &str,
 ) -> ExitCode {
+    use lex_os_supervisor::{BudgetLedger, Clock};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use lex_os_supervisor::{BudgetLedger, Clock};
 
     // Resolve + provision the (simulated) box from the effective manifest, the
     // same shape `run_under_supervisor` did, so the perimeter capability gate
     // is live before the first effect.
     if let Err(e) = resolve(&installed.manifest, env) {
-        return emit_err(fmt, "capsule.install", ExitCode::PreconditionFailed, &e.to_string());
+        return emit_err(
+            fmt,
+            "capsule.install",
+            ExitCode::PreconditionFailed,
+            &e.to_string(),
+        );
     }
     let policy = SandboxPolicy::from_manifest(&installed.manifest);
     let mut perimeter = SimulatedPerimeter::new();
     if let Err(e) = perimeter.provision(policy) {
-        return emit_err(fmt, "capsule.install", ExitCode::PreconditionFailed, &e.to_string());
+        return emit_err(
+            fmt,
+            "capsule.install",
+            ExitCode::PreconditionFailed,
+            &e.to_string(),
+        );
     }
     let mut audit = audit;
     audit.append(Event::Provisioned {
@@ -668,7 +670,11 @@ fn run_in_box(
         Err(e) => (false, e.to_string()),
     };
     st.audit.append(Event::SessionEnded {
-        outcome: if run_ok { "goal_met".into() } else { "halted".into() },
+        outcome: if run_ok {
+            "goal_met".into()
+        } else {
+            "halted".into()
+        },
     });
     write_audit(&st.audit, audit_out);
 

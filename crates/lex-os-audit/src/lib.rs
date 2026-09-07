@@ -355,7 +355,7 @@ impl Checkpoint {
             return Err(AuditError::Checkpoint {
                 detail: format!(
                     "checkpoint is signed by {}, which is not the key given to verify it",
-                    &self.signer
+                    self.signer
                 ),
             });
         }
@@ -611,7 +611,7 @@ impl<E: ChainPayload> Chain<E> {
                     seq: entry.seq,
                     detail: format!(
                         "sealed by {}, which is not among the {} trusted key(s)",
-                        &seal.signer,
+                        seal.signer,
                         trusted.len()
                     ),
                 });
