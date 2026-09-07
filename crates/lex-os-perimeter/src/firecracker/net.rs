@@ -1,4 +1,40 @@
 //! Host-side tap device + iptables rule management.
+//!
+//! # The wall runs before DNAT, and that is the whole design (#79)
+//!
+//! The first real `wall2.sh` run on a KVM host found the box reaching a
+//! host service the grant never allowlisted. The rules were right; the
+//! *hook* was wrong. Netfilter's path is:
+//!
+//! ```text
+//! raw/PREROUTING → conntrack → mangle/PREROUTING → nat/PREROUTING
+//!     → [routing decision] → INPUT or FORWARD → filter rules
+//! ```
+//!
+//! The wall used to live in filter/FORWARD and filter/INPUT — after the
+//! routing decision. Docker puts this in nat/PREROUTING:
+//!
+//! ```text
+//! -A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER
+//! ```
+//!
+//! The tap gateway is a LOCAL address, so a guest packet aimed at it is
+//! DNAT'd to a container before any filter rule runs. That rewrites the
+//! destination (so `-d` allowlist matches compare against an address the
+//! guest never named) *and* changes the routing decision (so host-local
+//! traffic goes to FORWARD, not INPUT, and the INPUT fence never sees
+//! it). No ordering of filter rules can fix either.
+//!
+//! So the wall lives in **mangle/PREROUTING**, in a private chain jumped
+//! to from position 1. There the original destination is intact and no
+//! other subsystem has had a say. A private chain also means teardown is
+//! a flush, not a scoped hunt through rules other tools own.
+//!
+//! The filter-table ACCEPTs remain, and are not the wall: they exist so
+//! allowlisted traffic still passes on hosts whose FORWARD or INPUT
+//! policy is DROP. The catch-alls that used to sit beside them are gone,
+//! because a wall that cannot be made correct is worse than no wall — it
+//! reads as protection.
 
 use std::net::ToSocketAddrs;
 use std::process::Command;
@@ -11,6 +47,75 @@ pub(super) enum NetError {
     MissingTool { cmd: &'static str },
     #[error("invalid egress entry `{0}`: {1}")]
     InvalidEgress(String, String),
+}
+
+/// The private chain holding the egress wall.
+///
+/// One name for every tap: a host runs one box at a time here, and the
+/// jump rule is what scopes the chain to an interface. A per-tap name
+/// would leak chains on every crashed run.
+pub(super) const EGRESS_CHAIN: &str = "LEX_OS_EGRESS";
+
+/// `-t mangle`, as argv. Every rule of the wall carries it.
+fn mangle(rest: &[&str]) -> Vec<String> {
+    let mut v = vec!["-t".to_string(), "mangle".to_string()];
+    v.extend(rest.iter().map(|s| s.to_string()));
+    v
+}
+
+/// Jump into the wall from **position 1** of mangle/PREROUTING.
+///
+/// Inserted, never appended. Appending puts the wall after whatever
+/// Docker, libvirt or a VPN already installed, and on a host with any
+/// pre-existing ACCEPT that is the same as having no wall at all — which
+/// is exactly how #79 stayed invisible.
+pub(super) fn build_mangle_jump_rule(tap: &str) -> Vec<String> {
+    mangle(&["-I", "PREROUTING", "1", "-i", tap, "-j", EGRESS_CHAIN])
+}
+
+/// The same rule, as a delete.
+pub(super) fn build_mangle_unjump_rule(tap: &str) -> Vec<String> {
+    mangle(&["-D", "PREROUTING", "-i", tap, "-j", EGRESS_CHAIN])
+}
+
+/// Let the rest of an already-permitted flow through without re-matching
+/// the allowlist. `RETURN` rather than `ACCEPT`: it hands the packet back
+/// to PREROUTING so anything another tool installs later still runs.
+/// `ACCEPT` here would silently skip the rest of the table.
+pub(super) fn build_mangle_established_rule() -> Vec<String> {
+    mangle(&[
+        "-A",
+        EGRESS_CHAIN,
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "ESTABLISHED,RELATED",
+        "-j",
+        "RETURN",
+    ])
+}
+
+/// One allowlisted destination, matched on the address the guest
+/// actually dialled — which is only true before nat/PREROUTING.
+pub(super) fn build_mangle_accept_rule(host: &str, port: u16) -> Vec<String> {
+    mangle(&[
+        "-A",
+        EGRESS_CHAIN,
+        "-d",
+        host,
+        "-p",
+        "tcp",
+        "--dport",
+        &port.to_string(),
+        "-j",
+        "RETURN",
+    ])
+}
+
+/// The catch-all. Last in the chain, and the chain is entered from
+/// position 1, so nothing on the host can preempt it.
+pub(super) fn build_mangle_drop_rule() -> Vec<String> {
+    mangle(&["-A", EGRESS_CHAIN, "-j", "DROP"])
 }
 
 /// Build the argv for an iptables ACCEPT rule on the host's FORWARD chain.
@@ -28,18 +133,6 @@ pub(super) fn build_iptables_accept_rule(tap: &str, host: &str, port: u16) -> Ve
         port.to_string(),
         "-j".into(),
         "ACCEPT".into(),
-    ]
-}
-
-/// Build the argv for the catch-all DROP that follows the ACCEPTs.
-pub(super) fn build_iptables_drop_rule(tap: &str) -> Vec<String> {
-    vec![
-        "-A".into(),
-        "FORWARD".into(),
-        "-i".into(),
-        tap.into(),
-        "-j".into(),
-        "DROP".into(),
     ]
 }
 
@@ -78,21 +171,6 @@ pub(super) fn build_iptables_input_established_rule(tap: &str) -> Vec<String> {
         "ESTABLISHED,RELATED".into(),
         "-j".into(),
         "ACCEPT".into(),
-    ]
-}
-
-/// Catch-all DROP for box→host-local traffic not explicitly allowlisted. This is
-/// the leg that closes the single-tenant hole: without it the box could reach
-/// *any* service on the host (ssh, metadata, other tenants) via INPUT, since
-/// only FORWARD was fenced.
-pub(super) fn build_iptables_input_drop_rule(tap: &str) -> Vec<String> {
-    vec![
-        "-A".into(),
-        "INPUT".into(),
-        "-i".into(),
-        tap.into(),
-        "-j".into(),
-        "DROP".into(),
     ]
 }
 
@@ -139,9 +217,20 @@ pub(super) fn create_tap(
     Ok(())
 }
 
-/// Apply egress allowlist rules to the tap's outbound traffic. The DROP
-/// catchall is appended LAST so ordering matters.
+/// Apply the egress wall.
+///
+/// The wall itself is the private mangle chain (#79); the filter-table
+/// ACCEPTs that follow are **not** part of it. They exist so allowlisted
+/// traffic still passes on a host whose FORWARD or INPUT policy is DROP,
+/// and they can only ever permit what the wall already let past.
 pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(), NetError> {
+    // A private chain, rebuilt from empty. A crashed run may have left
+    // one behind, and a wall inheriting half of a previous grant's
+    // allowlist is a wall nobody can reason about.
+    let _ = run("iptables", &as_str_slice(&mangle(&["-N", EGRESS_CHAIN])));
+    run("iptables", &as_str_slice(&mangle(&["-F", EGRESS_CHAIN])))?;
+    run("iptables", &as_str_slice(&build_mangle_established_rule()))?;
+
     for entry in egress {
         let (host, port) = parse_host_port(entry)?;
         // Resolve to an IP ourselves and pin the rule to it. Letting iptables
@@ -153,10 +242,12 @@ pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(
         match resolve_host(&host, port) {
             Some(ip) => {
                 let ip = ip.to_string();
-                // Allow the target on BOTH chains: FORWARD covers external /
-                // routed destinations, INPUT covers host-local ones (the
-                // tap-gateway results-stub). The grant is the single source for
-                // both — no chain knows anything the manifest didn't grant.
+                run(
+                    "iptables",
+                    &as_str_slice(&build_mangle_accept_rule(&ip, port)),
+                )?;
+                // Permissive helpers on the filter table, for hosts whose
+                // policy is DROP. Harmless where it is ACCEPT.
                 run(
                     "iptables",
                     &as_str_slice(&build_iptables_accept_rule(tap, &ip, port)),
@@ -174,19 +265,18 @@ pub(super) fn install_egress_allowlist(tap: &str, egress: &[String]) -> Result<(
             }
         }
     }
-    // Fail-closed catch-alls on BOTH chains. FORWARD fences routed egress; INPUT
-    // fences box→host-local egress (closing the single-tenant hole where the box
-    // could otherwise reach arbitrary services on the host). The INPUT
-    // ESTABLISHED,RELATED accept lets allowed flows complete.
+
+    // The catch-all, then the jump. In that order: a chain reachable
+    // before it is fail-closed would pass whatever arrived in between.
+    run("iptables", &as_str_slice(&build_mangle_drop_rule()))?;
     run(
         "iptables",
         &as_str_slice(&build_iptables_input_established_rule(tap)),
     )?;
-    run("iptables", &as_str_slice(&build_iptables_drop_rule(tap)))?;
-    run(
-        "iptables",
-        &as_str_slice(&build_iptables_input_drop_rule(tap)),
-    )?;
+    // Idempotent: drop any jump left by a crashed run before adding ours,
+    // or PREROUTING accumulates duplicates.
+    let _ = run("iptables", &as_str_slice(&build_mangle_unjump_rule(tap)));
+    run("iptables", &as_str_slice(&build_mangle_jump_rule(tap)))?;
     Ok(())
 }
 
@@ -282,9 +372,19 @@ fn resolve_host(host: &str, port: u16) -> Option<std::net::IpAddr> {
 /// does NOT flush the chain: the host may carry Docker / libvirt / VPN rules
 /// on FORWARD that must survive a box teardown. Idempotent: ignores misses.
 pub(super) fn flush_egress_rules(tap: &str) -> Result<(), NetError> {
-    // Both chains carry our `-i tap` rules now (FORWARD for routed egress, INPUT
-    // for host-local). scoped_delete_args keeps the chain name from each line, so
-    // the same helper cleans either listing.
+    // The wall first (#79). Unjump before flushing, so there is never an
+    // instant where PREROUTING points at an empty — therefore permissive
+    // — chain. Every step is best-effort: teardown runs on the failure
+    // path too, and a box that cannot be cleaned up is worse than a rule
+    // that outlives it.
+    let _ = run("iptables", &as_str_slice(&build_mangle_unjump_rule(tap)));
+    let _ = run("iptables", &as_str_slice(&mangle(&["-F", EGRESS_CHAIN])));
+    let _ = run("iptables", &as_str_slice(&mangle(&["-X", EGRESS_CHAIN])));
+
+    // Then the permissive filter-table helpers. These are ACCEPTs rather
+    // than the wall, but they are still ours and still scoped to the tap.
+    // Deliberately NOT a flush: the host may carry Docker / libvirt / VPN
+    // rules on these chains that must survive a box teardown.
     for chain in ["FORWARD", "INPUT"] {
         let listing = Command::new("iptables")
             .args(["-S", chain])
@@ -379,10 +479,81 @@ mod tests {
         );
     }
 
+    /// The wall is entered from **position 1** of mangle/PREROUTING.
+    ///
+    /// This is the fix for #79 in one assertion. Appending put the wall
+    /// after Docker's rules, where a pre-existing ACCEPT made it
+    /// decorative; and mangle/PREROUTING runs *before* nat, so the
+    /// destination the guest dialled is still the destination being
+    /// matched.
     #[test]
-    fn build_iptables_drop_catchall_is_appended_last() {
-        let argv = build_iptables_drop_rule("tap-lex0");
-        assert_eq!(argv, vec!["-A", "FORWARD", "-i", "tap-lex0", "-j", "DROP"]);
+    fn the_wall_is_entered_from_position_one_of_mangle_prerouting() {
+        let argv = build_mangle_jump_rule("tap-lex0");
+        assert_eq!(
+            argv,
+            vec![
+                "-t",
+                "mangle",
+                "-I",
+                "PREROUTING",
+                "1",
+                "-i",
+                "tap-lex0",
+                "-j",
+                "LEX_OS_EGRESS"
+            ]
+        );
+        // `-A` would reintroduce #79 exactly.
+        assert!(!argv.contains(&"-A".to_string()));
+    }
+
+    /// The unjump must match the jump, or teardown leaves a chain nobody
+    /// can enter and a PREROUTING rule pointing at it.
+    #[test]
+    fn the_unjump_matches_the_jump() {
+        let up = build_mangle_jump_rule("tap-lex0");
+        let down = build_mangle_unjump_rule("tap-lex0");
+        assert_eq!(down[0..2], ["-t", "mangle"]);
+        assert_eq!(down[2], "-D");
+        // Same interface and same target, so it deletes the rule we added.
+        assert!(down.contains(&"tap-lex0".to_string()));
+        assert!(down.contains(&"LEX_OS_EGRESS".to_string()));
+        assert!(up.contains(&"LEX_OS_EGRESS".to_string()));
+    }
+
+    /// The catch-all lives in the private chain and drops. Nothing on the
+    /// host can precede it, because the chain is entered at position 1.
+    #[test]
+    fn the_catchall_drops_inside_the_private_chain() {
+        assert_eq!(
+            build_mangle_drop_rule(),
+            vec!["-t", "mangle", "-A", "LEX_OS_EGRESS", "-j", "DROP"]
+        );
+    }
+
+    /// An allowlisted destination returns to PREROUTING rather than
+    /// ACCEPTing, so rules another tool installs later still run.
+    #[test]
+    fn an_allowlisted_destination_returns_rather_than_accepts() {
+        let argv = build_mangle_accept_rule("169.254.42.1", 8080);
+        assert_eq!(
+            argv,
+            vec![
+                "-t",
+                "mangle",
+                "-A",
+                "LEX_OS_EGRESS",
+                "-d",
+                "169.254.42.1",
+                "-p",
+                "tcp",
+                "--dport",
+                "8080",
+                "-j",
+                "RETURN"
+            ]
+        );
+        assert!(!argv.contains(&"ACCEPT".to_string()));
     }
 
     #[test]
@@ -409,11 +580,19 @@ mod tests {
         );
     }
 
+    /// #79's regression test, at the level a unit test can reach: the
+    /// wall must not be built out of filter-table rules at all.
+    ///
+    /// A packet DNAT'd by Docker has already had its destination
+    /// rewritten and its chain reassigned by the time filter runs, so a
+    /// DROP there is unreachable for exactly the traffic it was written
+    /// to stop. Whatever else changes, the catch-all belongs in mangle.
     #[test]
-    fn input_drop_catchall_closes_the_host_local_hole() {
-        // Without this, the box could reach any host-local service via INPUT.
-        let argv = build_iptables_input_drop_rule("tap-lex0");
-        assert_eq!(argv, vec!["-A", "INPUT", "-i", "tap-lex0", "-j", "DROP"]);
+    fn the_catchall_is_not_in_the_filter_table() {
+        let drop = build_mangle_drop_rule();
+        assert_eq!(drop[0..2], ["-t", "mangle"]);
+        assert!(!drop.contains(&"FORWARD".to_string()));
+        assert!(!drop.contains(&"INPUT".to_string()));
     }
 
     #[test]
