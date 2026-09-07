@@ -30,6 +30,16 @@ usual networking tools. Nothing lex-os-specific beyond the `kvm` label.
 > not add `pull_request` to this workflow, and in **Settings → Actions → General**
 > require approval for outside collaborators.
 
+## The guest kernel
+
+`setup-assets.sh` fetches Firecracker's CI kernel (6.1.102 by default,
+`KERNEL_VERSION=` to override) rather than the quickstart 4.14 image,
+because only the former carries `CONFIG_HW_RANDOM_VIRTIO`. Without it a
+guest never gets past `random: fast init done`, `getrandom(2)` blocks,
+and anything wanting entropy early — Go binaries, TLS handshakes — hangs
+(lex-os#82). The script replaces a kernel that lacks the driver rather
+than merely a missing one.
+
 ## Architecture
 
 **x86_64 and aarch64 both work.** `demo/setup-assets.sh` reads `uname -m` and
