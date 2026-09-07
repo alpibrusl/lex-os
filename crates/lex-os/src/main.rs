@@ -266,6 +266,19 @@ enum Cmd {
         /// then close it. Omit to close stdin immediately with no input.
         #[arg(long)]
         stdin_file: Option<PathBuf>,
+        /// Boot the box from this guest filesystem instead of the demo's.
+        ///
+        /// `exec` runs the command *inside* the microVM, so the binary has
+        /// to exist in the guest's own filesystem — there is no host mount.
+        /// A caller with something to run that the demo image does not
+        /// carry (a terraform binary, say) supplies its own image rather
+        /// than overwriting lex-os's.
+        #[arg(long)]
+        rootfs: Option<PathBuf>,
+        /// Boot this kernel instead of the demo's. Rarely needed; a custom
+        /// rootfs usually works with the stock kernel.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
         /// Use the in-process simulated perimeter instead of a real
         /// microVM. NOT a security boundary — for portability/tests/dev.
         /// Without it, a non-KVM host refuses rather than silently
@@ -479,6 +492,8 @@ fn main() {
             namespaces_only,
             offline,
             stdin_file,
+            rootfs,
+            kernel,
             simulated,
             guest_bin,
             jail,
@@ -490,6 +505,7 @@ fn main() {
             namespaces_only,
             offline,
             stdin_file,
+            GuestImage { rootfs, kernel },
             simulated,
             guest_bin,
             jail,
@@ -1079,11 +1095,12 @@ fn run_exec_in_vm(
     manifest: Manifest,
     env: &lex_os_resolver::Environment,
     jail: Option<lex_os_perimeter::JailConfig>,
+    image: &GuestImage,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
     use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter, GUEST_CONSOLE};
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
 
-    let assets = FirecrackerAssets {
+    let assets = image.apply(FirecrackerAssets {
         boot_args: format!(
             "console={} reboot=k panic=1 pci=off init=/sbin/init.agent guest_script={}",
             GUEST_CONSOLE,
@@ -1091,7 +1108,7 @@ fn run_exec_in_vm(
         ),
         jail: jail.clone(),
         ..FirecrackerAssets::default()
-    };
+    });
 
     let perimeter = FirecrackerPerimeter::with_assets(assets);
     let vsock_base = perimeter
@@ -1662,6 +1679,51 @@ fn cmd_audit_tail(log: &PathBuf) -> ! {
 
 // Knobs map 1:1 to CLI flags; a struct would just shuffle the names around.
 #[allow(clippy::too_many_arguments)]
+/// A caller-supplied guest filesystem and kernel, either defaulted.
+///
+/// Bundled rather than threaded as two `Option<PathBuf>` because they
+/// are one decision — "boot something other than the demo image" — and
+/// `cmd_exec` already takes more arguments than is comfortable.
+#[derive(Debug, Clone, Default)]
+pub struct GuestImage {
+    pub rootfs: Option<PathBuf>,
+    pub kernel: Option<PathBuf>,
+}
+
+impl GuestImage {
+    /// Overlay onto the defaults, leaving anything unset alone.
+    #[cfg(feature = "firecracker")]
+    fn apply(
+        &self,
+        mut assets: lex_os_perimeter::FirecrackerAssets,
+    ) -> lex_os_perimeter::FirecrackerAssets {
+        if let Some(r) = &self.rootfs {
+            assets.rootfs = r.clone();
+        }
+        if let Some(k) = &self.kernel {
+            assets.kernel = k.clone();
+        }
+        assets
+    }
+
+    /// Refuse early on a path that is not there.
+    ///
+    /// Firecracker's own failure for a missing rootfs surfaces as a boot
+    /// that dies with an unhelpful message several seconds later, by
+    /// which point a tap and a jail have been created and torn down.
+    fn check(&self) -> Result<(), String> {
+        for (what, path) in [("rootfs", &self.rootfs), ("kernel", &self.kernel)] {
+            if let Some(p) = path {
+                if !p.exists() {
+                    return Err(format!("--{what} {} does not exist", p.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_exec(
     fmt: &OutputFormat,
     manifest_path: PathBuf,
@@ -1669,6 +1731,7 @@ fn cmd_exec(
     namespaces_only: bool,
     offline: bool,
     stdin_file: Option<PathBuf>,
+    image: GuestImage,
     simulated: bool,
     guest_bin: Option<PathBuf>,
     jail: JailArgs,
@@ -1676,6 +1739,23 @@ fn cmd_exec(
 ) -> ExitCode {
     let _ = &jail; // consumed only by the firecracker path below
     let start = Instant::now();
+
+    if let Err(e) = image.check() {
+        return emit_err(fmt, "exec", ExitCode::NotFound, &e);
+    }
+    if simulated && (image.rootfs.is_some() || image.kernel.is_some()) {
+        // Refuse, don't downgrade. The simulator has no guest filesystem
+        // at all, so silently ignoring the flag would run the command on
+        // the host while the caller believed it was in their image.
+        return emit_err(
+            fmt,
+            "exec",
+            ExitCode::InvalidArgs,
+            "--rootfs/--kernel need a real microVM; the simulated perimeter has no guest \
+             filesystem, and running your command on the host instead is not a downgrade \
+             anyone asked for",
+        );
+    }
 
     let backend = match select_backend(simulated) {
         Ok(b) => b,
@@ -1720,7 +1800,7 @@ fn cmd_exec(
     let report = match backend {
         Backend::Simulated => run_exec_subprocess(exec_manifest, &env, guest_bin),
         #[cfg(feature = "firecracker")]
-        Backend::Real => run_exec_in_vm(exec_manifest, &env, jail.to_config()),
+        Backend::Real => run_exec_in_vm(exec_manifest, &env, jail.to_config(), &image),
         #[cfg(not(feature = "firecracker"))]
         Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
     };
