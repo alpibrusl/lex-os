@@ -28,7 +28,7 @@ jobs:
       - name: Clippy (warnings are errors)
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
 
       # The KVM gate's own regression test, run on ordinary CI because it
       # needs no KVM — only saved output from runs that did.
@@ -49,4 +49,4 @@ jobs:
               exit 1
             fi
             echo "correctly refused: $bad"
-          done --workspace
+          done
