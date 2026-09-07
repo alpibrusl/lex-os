@@ -31,7 +31,21 @@ MUSL_TARGET="${ARCH}-unknown-linux-musl"
 
 FC_TGZ="firecracker-${FC_VERSION}-${ARCH}.tgz"
 FC_REL="release-${FC_VERSION}-${ARCH}"
-KERNEL_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/kernels/vmlinux.bin
+# The guest kernel, from Firecracker's CI bucket rather than the
+# quickstart one (#82).
+#
+# The quickstart kernel is 4.14.174, built in 2021, and has **no
+# virtio-rng driver**. A microVM boots with almost no entropy and
+# `getrandom(2)` blocks until the pool is *fully* seeded — not merely
+# "fast init done", which is all a bare box reaches — so anything wanting
+# randomness early hangs. Go's runtime, Rust's `getrandom` and every TLS
+# handshake sit behind that call, which ruled out most real workloads in
+# a box whose entire purpose is running them.
+#
+# The CI kernels carry CONFIG_HW_RANDOM_VIRTIO=y, so the entropy device
+# the perimeter now asks for has a driver to bind to.
+KERNEL_VERSION=${KERNEL_VERSION:-6.1.102}
+KERNEL_URL=https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/${ARCH}/vmlinux-${KERNEL_VERSION}
 ROOTFS_URL=https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/rootfs/bionic.rootfs.ext4
 
 # 1. Firecracker + jailer binaries, staged in demo/assets/.
@@ -77,7 +91,32 @@ install_if_stale firecracker
 install_if_stale jailer
 
 # 3. Guest kernel + rootfs.
-[ -f vmlinux ]     || { echo "+ fetching guest kernel"; curl -fsSL -o vmlinux "$KERNEL_URL"; }
+# Replace a kernel that cannot drive the entropy device, not merely a
+# missing one. A host that ran an older setup-assets has a 4.14 vmlinux
+# sitting here, and "the file exists" would keep it — the same shape of
+# bug that let the firecracker pin go stale on a machine that already had
+# one. Detected by content: the driver's name is in the image or it is
+# not.
+# `grep -c`, not `grep -q`. Under `set -o pipefail` a `grep -q` exits on
+# the first match, SIGPIPEs `strings`, and the pipeline reports 141 — so
+# the test says "no driver" about a kernel that has one, and the fetch
+# repeats on every run. `-c` reads to EOF and has no such opinion.
+has_virtio_rng() {
+  [ -f "$1" ] || return 1
+  [ "$(strings "$1" 2>/dev/null | grep -icE 'virtio_rng|virtio-rng')" -gt 0 ]
+}
+
+if has_virtio_rng vmlinux; then
+  echo "+ guest kernel already has virtio-rng"
+else
+  [ -f vmlinux ] && echo "+ replacing a guest kernel with no virtio-rng (#82)"
+  echo "+ fetching guest kernel $KERNEL_VERSION ($ARCH)"
+  curl -fsSL -o vmlinux "$KERNEL_URL"
+  has_virtio_rng vmlinux || {
+    echo "! the fetched kernel has no virtio-rng; anything calling getrandom(2)" >&2
+    echo "  early will block in the box (see lex-os#82)" >&2
+  }
+fi
 [ -f rootfs.ext4 ] || { echo "+ fetching guest rootfs"; curl -fsSL -o rootfs.ext4 "$ROOTFS_URL"; }
 
 # 4. Build the in-VM agent binary (static musl, with the vsock transport) so
