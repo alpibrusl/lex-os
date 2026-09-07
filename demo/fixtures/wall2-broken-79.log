@@ -1,0 +1,13 @@
+# Real output from the first wall2 run on a KVM host, 2026-09-07, before
+# the fix in #80. The box reached lex-soft-node-caddy-1 — a container the
+# grant allowlisted nothing of — and the job would have gone green.
+--- allowed (the legitimate target) ---
+ -> allowed target unreachable (results-stub not up, or rule missing)
+--- denied: host-local service NOT in the allowlist (INPUT fence) ---
+ -> UNEXPECTED: host-local :8080 succeeded -- INPUT wall did NOT fire
+--- denied: named host outside the allowlist ---
+ -> blocked (no route)
+--- denied: raw IP, no DNS involved ---
+ -> blocked (no route)
+--- done ---
+box-smoke: box destroyed, host tap + egress rules removed

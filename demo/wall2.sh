@@ -66,17 +66,30 @@ WALL_COUNTS=/tmp/lex-os-wall-counters.$$
 ) &
 COUNTER_PID=$!
 
+RUN_LOG=$(mktemp)
+cleanup_log() { rm -f "$RUN_LOG"; }
+trap cleanup_log EXIT
+
 echo "+ booting the JAILED box (uid=$JAIL_UID gid=$JAIL_GID) — watch for the guest console and '8.8.8.8 -> blocked'"
+# Teed, not swallowed: the console is the demo, and the log is what the
+# assertions read afterwards.
 "$LEXOS" box-smoke --manifest demo/manifest.json --dwell "${DWELL:-12}" \
-  --jail-uid "$JAIL_UID" --jail-gid "$JAIL_GID"
+  --jail-uid "$JAIL_UID" --jail-gid "$JAIL_GID" 2>&1 | tee -a "$RUN_LOG"
 
 wait "$COUNTER_PID" 2>/dev/null || true
 if [ -s "$WALL_COUNTS" ]; then
   echo
   cat "$WALL_COUNTS"
   echo
+  cat "$WALL_COUNTS" >> "$RUN_LOG"
   echo "Read it as: RETURN rules with packets = the allowlist let something through;"
   echo "DROP with packets = the wall refused something. Both non-zero is the proof —"
   echo "all-DROP would pass every denial probe while permitting nothing."
 fi
+
+# The verdict. Until #54 this script exited 0 whenever the box booted, so
+# the nightly job went green through the whole life of #79 — the guest
+# printed "UNEXPECTED" and nothing read it.
+echo
+bash "$REPO_ROOT/demo/assert-wall.sh" "$RUN_LOG"
 rm -f "$WALL_COUNTS"
