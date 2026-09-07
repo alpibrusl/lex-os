@@ -1,6 +1,7 @@
 # Real output from the first wall2 run on a KVM host, 2026-09-07, before
-# the fix in #80. The box reached lex-soft-node-caddy-1 — a container the
-# grant allowlisted nothing of — and the job would have gone green.
+# the fix in #80. The box reached a container published on the host's
+# :8080 — something the grant allowlisted nothing of — and the job would
+# have gone green.
 --- allowed (the legitimate target) ---
  -> allowed target unreachable (results-stub not up, or rule missing)
 --- denied: host-local service NOT in the allowlist (INPUT fence) ---
