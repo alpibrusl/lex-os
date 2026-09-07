@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/assets"
 
-FC_VERSION=v1.9.1
+FC_VERSION=v1.16.1
 
 # Firecracker does not emulate a foreign ISA, so the guest architecture is
 # the host's. `uname -m` spells it the same way Firecracker's release
@@ -51,24 +51,30 @@ fi
 
 # 2. Install firecracker + jailer onto PATH (needs root). vm.rs spawns
 #    firecracker directly (unjailed) or via jailer (the hardened, non-root path).
-if ! command -v firecracker >/dev/null 2>&1; then
-  if [ "$(id -u)" -eq 0 ]; then
-    echo "+ installing firecracker to /usr/local/bin"
-    install -m 0755 ./firecracker /usr/local/bin/firecracker
-  else
-    echo "! firecracker not on PATH; re-run with sudo, or:"
-    echo "    sudo install -m 0755 $(pwd)/firecracker /usr/local/bin/firecracker"
+#
+#    Version-aware, deliberately. The earlier `command -v firecracker ||
+#    install` skipped the install whenever *any* firecracker was already on
+#    PATH — so bumping FC_VERSION here changed what got downloaded into
+#    demo/assets/ and left the host running the old binary, with nothing
+#    saying so. A pin that does not reach the machine is not a pin.
+install_if_stale() {
+  tool="$1"
+  want="${FC_VERSION#v}"
+  have="$("$tool" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if [ "$have" = "$want" ]; then
+    echo "+ $tool $have already on PATH"
+    return 0
   fi
-fi
-if ! command -v jailer >/dev/null 2>&1; then
   if [ "$(id -u)" -eq 0 ]; then
-    echo "+ installing jailer to /usr/local/bin"
-    install -m 0755 ./jailer /usr/local/bin/jailer
+    echo "+ installing $tool ${have:+$have -> }$want to /usr/local/bin"
+    install -m 0755 "./$tool" "/usr/local/bin/$tool"
   else
-    echo "! jailer not on PATH; re-run with sudo, or:"
-    echo "    sudo install -m 0755 $(pwd)/jailer /usr/local/bin/jailer"
+    echo "! $tool on PATH is ${have:-absent}, want $want; re-run with sudo, or:"
+    echo "    sudo install -m 0755 $(pwd)/$tool /usr/local/bin/$tool"
   fi
-fi
+}
+install_if_stale firecracker
+install_if_stale jailer
 
 # 3. Guest kernel + rootfs.
 [ -f vmlinux ]     || { echo "+ fetching guest kernel"; curl -fsSL -o vmlinux "$KERNEL_URL"; }
