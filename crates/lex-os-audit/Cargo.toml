@@ -16,3 +16,9 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+# Ed25519 over the entry hash and over the checkpoint (lex-os#54). The
+# hash chain is derived, so a holder who can edit the log can recompute
+# every hash in it; a signature is the thing they cannot forge. Same
+# curve and the same `hex` encoding as `lex-os-capsule`, deliberately —
+# one key format across the project beats two.
+ed25519-dalek = { workspace = true }

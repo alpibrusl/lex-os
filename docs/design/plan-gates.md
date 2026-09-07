@@ -240,6 +240,27 @@ truncate it is the party being protected.
 Recorded in `lex-os-audit`'s module docs and pinned by
 `tail_truncation_is_not_detected`.
 
+**Amended again (lex-os#54).** "lex-os has no equivalent" was true when
+it was written and is no longer. `lex-os-audit` now has both halves of
+what `lex-trail`'s `anchor.lex` describes:
+
+- **Seals** — an Ed25519 signature over each entry's hash. The
+  positional argument covered the *box*, but not a holder of the log
+  who edits it and recomputes every hash afterwards. A seal is the part
+  they cannot recompute.
+- **Checkpoints** — a signature over `(domain, len, head)`. This is the
+  external commitment, and it closes truncation for the same reason
+  `lex-trail`'s anchor does: a chain cannot contradict a commitment its
+  holder never had a copy of.
+
+The positional argument stands and is now doing less work. It was
+carrying two claims on its own; it carries neither alone any more.
+
+What none of it closes: a compromised signer. A key that signs whatever
+it is given produces a log that verifies and lies. The layers make a
+rewrite need the key and a truncation need to reach two places — they do
+not make the record true.
+
 ### 3. Deny-lists: decided
 
 The facet is **allow-only plus scopes**. A `deny` list does not narrow —

@@ -70,7 +70,7 @@ Two boundaries, kept strictly separate:
 | Crate | Role |
 | --- | --- |
 | [`lex-os-manifest`](crates/lex-os-manifest) | The trust manifest: goal + capability **grant** + **budget** (integer cents) + reversibility + isolation floor. Content-addressable. Re-exports the trust lattice from `lex-types`. |
-| [`lex-os-audit`](crates/lex-os-audit) | Tamper-evident, **hash-chained** external audit log. An agent editing its own logs is designed out — append-only, no edit/truncate API. |
+| [`lex-os-audit`](crates/lex-os-audit) | Tamper-evident, **hash-chained** external audit log. An agent editing its own logs is designed out — append-only, no edit/truncate API. Entries can be **sealed** (Ed25519) and the log **checkpointed**, which is what stops a holder who recomputes and a tail that goes missing (lex-os#54). |
 | [`lex-os-check`](crates/lex-os-check) | The **type-check wall**: runs an agent's `.lex` program through the real Lex front-end (`lex-syntax` → `lex-ast` → `lex-types`) and refuses it if its declared effects exceed the grant — *before* it runs. Backs the `check` command. |
 | [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: `SandboxPolicy::from_grant` is the single grant→OS-policy mapping. Pluggable isolation backends behind the `Perimeter` trait — a portable simulated one and a real Firecracker microVM (feature `firecracker`). |
 | [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied — every failure mode is an error, never a silent weakening. |
@@ -116,6 +116,44 @@ cargo run -p lex-os -- audit render --log audit.json     # NDJSON view
 cargo run -p lex-os -- audit tail --log audit.json       # follow the log live
 cargo run -p lex-os -- introspect                # acli command tree
 ```
+
+### Sealing the log, and committing to it
+
+The hash chain is *derived*, so whoever can edit the log can recompute
+every hash in it and hand you something that verifies. Two more layers
+close that, and the gap the chain structurally cannot see (lex-os#54):
+
+```sh
+cargo run -p lex-os -- capsule keygen                    # an Ed25519 key
+cargo run -p lex-os -- run --simulated --audit-out audit.json \
+                          --audit-key-file audit.key     # seal every entry
+
+# the three walls, each reported separately
+cargo run -p lex-os -- audit verify --log audit.json \
+                          --trusted-key <public-hex>
+
+# commit to the log's length and head, then hold it to that later
+cargo run -p lex-os -- audit checkpoint --log audit.json \
+                          --key-file audit.key --out cp.json
+cargo run -p lex-os -- audit verify --log audit.json \
+                          --trusted-key <public-hex> --checkpoint cp.json
+```
+
+| Wall | Catches | Misses |
+| --- | --- | --- |
+| the chain | an edited payload, a reordered entry, a deletion from the middle | a holder who recomputes; anything dropped from the tail |
+| the seals | a holder who edited the log and recomputed every hash | anything dropped from the tail |
+| a checkpoint | entries dropped from the tail | nothing, **if** it is held somewhere the log's holder cannot reach |
+
+That last condition is the whole mechanism, and it is not
+cryptographic: a checkpoint kept beside the log it commits to proves
+nothing, because whoever truncates one can replace the other. A
+checkpoint is a few hundred bytes precisely so publishing one somewhere
+else is never the hard part.
+
+`audit verify` reports the three separately, and says `checked: false`
+rather than passing when you gave it no key — a log whose seals nobody
+checked is not a log whose seals passed.
 
 The demo agent reads files, **deliberately destroys its own box**
 mid-task, and is transparently reprovisioned by the supervisor from the
@@ -450,6 +488,18 @@ Every command is classified by blast radius (`Reversibility` in
 3. You can replay effects deterministically; you cannot necessarily
    replay the agent's reasoning. The audit log records observable
    decisions, not the agent's thoughts.
+4. **The audit log is only as safe as where you put the checkpoint.**
+   Sealing means a rewrite needs the key; checkpointing means a
+   truncation needs to reach two places instead of one. Neither is
+   automatic: `--audit-key`/`--audit-key-file` is opt-in, and a
+   checkpoint nobody published is a checkpoint that proves nothing. An
+   unsealed log is reported as unsealed rather than as failing, which is
+   honest and is also not protection.
+5. **None of it survives a compromised signer.** A key that signs
+   whatever it is given produces a log that verifies and lies. What the
+   layers buy is that rewriting now requires the key and truncating now
+   requires reaching the checkpoint too — not that the record became
+   true.
 
 ## License
 

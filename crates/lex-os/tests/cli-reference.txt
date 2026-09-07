@@ -41,6 +41,14 @@ Options:
       --audit-out <AUDIT_OUT>
           Write the resulting tamper-proof audit log here
 
+      --audit-key <AUDIT_KEY>
+          Seal every audit entry with this key (32-byte hex).
+          
+          The hash chain is derived, so whoever can edit the log can recompute it; the seal is the part they cannot forge (lex-os#54). Prefer --audit-key-file: a secret in argv is a secret in `ps` and in your shell history.
+
+      --audit-key-file <AUDIT_KEY_FILE>
+          Read the audit signing key from a file instead
+
       --namespaces-only
           Pretend the host can only do namespace isolation
 
@@ -157,24 +165,75 @@ Audit-log utilities
 Usage: lex-os audit [OPTIONS] <COMMAND>
 
 Commands:
-  verify  Verify the hash chain of an audit log file
-  render  Render an audit log as newline-delimited JSON (one entry per line) for a live, tailable external view
-  tail    Follow an audit log file, printing new entries as they arrive (one NDJSON line per entry). Runs indefinitely; press Ctrl-C to stop
-  help    Print this message or the help of the given subcommand(s)
+  verify      Verify an audit log: the hash chain always, plus the seals and a checkpoint when you supply the keys to check them with
+  checkpoint  Sign a commitment to this log's current length and head
+  render      Render an audit log as newline-delimited JSON (one entry per line) for a live, tailable external view
+  tail        Follow an audit log file, printing new entries as they arrive (one NDJSON line per entry). Runs indefinitely; press Ctrl-C to stop
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
   -h, --help             Print help
 
 ===== lex-os audit verify =====
-Verify the hash chain of an audit log file
+Verify an audit log: the hash chain always, plus the seals and a checkpoint when you supply the keys to check them with.
+
+The three walls catch different things, and only the third catches truncation (lex-os#54):
+
+* the chain    — an edited payload, a reordered or deleted entry * the seals    — a holder who edited the log and recomputed it * a checkpoint — entries dropped from the tail
 
 Usage: lex-os audit verify [OPTIONS] --log <LOG>
 
 Options:
-      --log <LOG>        
-      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
-  -h, --help             Print help
+      --log <LOG>
+          
+
+      --output <OUTPUT>
+          Output format (text for humans, json for agents)
+          
+          [default: text]
+          [possible values: text, json]
+
+      --trusted-key <TRUSTED_KEYS>
+          Public key (32-byte hex) to check every entry's seal against. Repeatable. Supplying none checks no seals at all and says so; supplying some means *every* entry must be sealed by one of them
+
+      --checkpoint <CHECKPOINT>
+          A checkpoint written earlier by `lex-os audit checkpoint`. Needs --trusted-key to verify its signature: a checkpoint nobody vouched for is one the log's own holder could have written
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+===== lex-os audit checkpoint =====
+Sign a commitment to this log's current length and head.
+
+Publish the result somewhere the log's holder cannot rewrite — that is the entire mechanism. A checkpoint kept beside the log it commits to proves nothing, because whoever truncates one can replace the other.
+
+Usage: lex-os audit checkpoint [OPTIONS] --log <LOG>
+
+Options:
+      --log <LOG>
+          
+
+      --output <OUTPUT>
+          Output format (text for humans, json for agents)
+          
+          [default: text]
+          [possible values: text, json]
+
+      --key <KEY>
+          Signing key as 32-byte hex (the secret from `capsule keygen`)
+
+      --key-file <KEY_FILE>
+          Read the signing key from a file instead, so it never reaches argv or shell history
+
+      --at <AT>
+          The moment being committed to, as seconds since the epoch. Defaults to now
+
+      --out <OUT>
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 ===== lex-os audit render =====
 Render an audit log as newline-delimited JSON (one entry per line) for a live, tailable external view
