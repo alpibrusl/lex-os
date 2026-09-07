@@ -28,7 +28,7 @@ pub use command::{Command, CommandRegistry};
 pub use skill::{mediate_skill, SkillVerdict};
 pub use vsock_agent::VsockAgent;
 
-use lex_os_audit::{AuditLog, Event};
+use lex_os_audit::{AuditLog, Event, SigningKey};
 use lex_os_manifest::{
     Dimension, EscalationError, EscalationGrant, Grant, Manifest, Reversibility,
 };
@@ -249,6 +249,11 @@ pub struct Supervisor<P: Perimeter, C: Clock> {
     /// so a caller that already recorded a decision (e.g. a capsule
     /// install) gets one unbroken chain through the session it authorized.
     seed_audit: Option<AuditLog>,
+    /// Seals every entry this session writes (lex-os#54). `None` writes
+    /// an unsealed log, exactly as before — a supervisor nobody gave a
+    /// key to does not invent one, and the log says so by carrying no
+    /// seals rather than by carrying unverifiable ones.
+    audit_key: Option<SigningKey>,
 }
 
 impl<P: Perimeter, C: Clock> Supervisor<P, C> {
@@ -266,6 +271,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
             clock,
             limits,
             seed_audit: None,
+            audit_key: None,
         }
     }
 
@@ -275,6 +281,23 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
     /// session it led to.
     pub fn with_seed_audit(mut self, audit: AuditLog) -> Self {
         self.seed_audit = Some(audit);
+        self
+    }
+
+    /// Seal every entry of this session's log with `key` (lex-os#54).
+    ///
+    /// The hash chain is derived, so a holder who can edit the log can
+    /// recompute it; the seal is the part they cannot forge. It does not
+    /// stop the log being *truncated* — take a
+    /// `Chain::checkpoint` and publish it somewhere the holder does not
+    /// control for that.
+    ///
+    /// Note what this does **not** do to a seeded log: entries that
+    /// arrived before this session keep whatever seals they came with.
+    /// Re-sealing somebody else's entries would be this supervisor
+    /// vouching for decisions it did not make.
+    pub fn with_audit_key(mut self, key: SigningKey) -> Self {
+        self.audit_key = Some(key);
         self
     }
 
@@ -294,7 +317,14 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         let policy = SandboxPolicy::from_manifest(&self.manifest);
         // Continue a seeded log if the caller provided one (the capsule
         // install decision), else start fresh from GENESIS.
+        // The key goes on the log once, here, and every `append` below
+        // seals without deciding to (lex-os#54). A seeded log keeps the
+        // seals it arrived with: re-sealing entries this supervisor did
+        // not write would be vouching for decisions it did not make.
         let mut audit = self.seed_audit.take().unwrap_or_default();
+        if let Some(key) = self.audit_key.take() {
+            audit = audit.sealed_with(key);
+        }
         let mut ledger = BudgetLedger::new(self.manifest.budget, self.clock.now_secs());
         let mut checkpoint = Checkpoint::default();
         let mut exec_result: Option<ExecResult> = None;
@@ -897,6 +927,149 @@ mod tests {
         assert_eq!(report.ledger.commands_used(), 2);
         // The audit log is intact and tamper-evident.
         assert!(report.audit.verify().is_ok());
+    }
+
+    /// Every entry a sealed session writes carries a seal (lex-os#54).
+    ///
+    /// "Every" is the property under test. There are twenty-odd
+    /// `audit.append` sites in this file, and a log where most entries
+    /// are sealed is exactly the gap `verify_seals` refuses — an
+    /// unsealed entry in a sealed log is where a forged one goes. The
+    /// key lives on the chain rather than at the call sites precisely so
+    /// that none of them can forget, and this is what holds that.
+    #[test]
+    fn a_sealed_session_seals_every_entry() {
+        let m = manifest(
+            Grant::new(Level::ReadWrite, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        )
+        .with_audit_key(key.clone());
+
+        let mut agent = ScriptedAgent::new(vec![
+            AgentAction::Run("fs.read".into()),
+            // A denial, so the log carries an entry somebody would want
+            // gone — which is the entry a seal is for.
+            AgentAction::Run("net.fetch".into()),
+            AgentAction::Run("fs.write".into()),
+            AgentAction::Done,
+        ]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+
+        assert!(report.audit.len() > 3, "several events, not just one");
+        assert_eq!(
+            report.audit.sealed_count(),
+            report.audit.len(),
+            "every entry, not most of them"
+        );
+        report.audit.verify().expect("the chain");
+        report
+            .audit
+            .verify_seals(&[key.verifying_key()])
+            .expect("the seals");
+
+        // The negative control: another key must not do, or this test
+        // would pass on a `verify_seals` that returned Ok unconditionally.
+        assert!(report
+            .audit
+            .verify_seals(&[SigningKey::from_bytes(&[9u8; 32]).verifying_key()])
+            .is_err());
+    }
+
+    /// A supervisor nobody gave a key to writes exactly what it always
+    /// wrote. Sealing is opt-in, and an unsealed log is reported as
+    /// unsealed rather than as failing.
+    #[test]
+    fn an_unsealed_session_is_unchanged() {
+        let m = manifest(
+            Grant::new(Level::ReadWrite, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        );
+        let mut agent =
+            ScriptedAgent::new(vec![AgentAction::Run("fs.read".into()), AgentAction::Done]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+        assert_eq!(report.audit.sealed_count(), 0);
+        report.audit.verify().expect("still a valid chain");
+        assert!(
+            !report.audit.to_json().unwrap().contains("seal"),
+            "and the wire format is byte-for-byte what it was"
+        );
+    }
+
+    /// A seeded log keeps the seals it arrived with, and this session's
+    /// entries get this session's. Re-sealing somebody else's decisions
+    /// would be vouching for work this supervisor did not do.
+    #[test]
+    fn seeding_does_not_reseal_someone_elses_entries() {
+        let installer = SigningKey::from_bytes(&[1u8; 32]);
+        let session = SigningKey::from_bytes(&[2u8; 32]);
+
+        let mut seed = AuditLog::new().sealed_with(installer.clone());
+        seed.append(Event::CommandAllowed {
+            command: "capsule.install".into(),
+        });
+        let seed_len = seed.len();
+
+        let m = manifest(
+            Grant::new(Level::ReadWrite, Level::None, Level::None),
+            Budget::research_default(),
+        );
+        let sup = Supervisor::new(
+            m,
+            registry(),
+            SimulatedPerimeter::new(),
+            ManualClock::new(),
+            Limits::default(),
+        )
+        .with_seed_audit(seed)
+        .with_audit_key(session.clone());
+        let mut agent =
+            ScriptedAgent::new(vec![AgentAction::Run("fs.read".into()), AgentAction::Done]);
+        let report = sup.run(&Environment::full(), &mut agent).unwrap();
+
+        report
+            .audit
+            .verify()
+            .expect("one unbroken chain across both");
+        assert!(
+            report.audit.entries()[0]
+                .seal
+                .as_ref()
+                .unwrap()
+                .names(&installer.verifying_key()),
+            "the seeded entry still carries the installer's seal"
+        );
+        assert!(
+            report.audit.entries()[seed_len]
+                .seal
+                .as_ref()
+                .unwrap()
+                .names(&session.verifying_key()),
+            "and the session's entries carry the session's"
+        );
+        // Both signers together verify the whole log; either alone does not.
+        report
+            .audit
+            .verify_seals(&[installer.verifying_key(), session.verifying_key()])
+            .expect("both");
+        assert!(report
+            .audit
+            .verify_seals(&[session.verifying_key()])
+            .is_err());
     }
 
     #[test]

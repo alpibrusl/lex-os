@@ -25,7 +25,7 @@ use acli::{emit, error_envelope, success_envelope, ExitCode, OutputFormat};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
-use lex_os_audit::AuditLog;
+use lex_os_audit::{AuditLog, Checkpoint, SigningKey, VerifyingKey};
 use lex_os_manifest::Manifest;
 #[cfg(feature = "firecracker")]
 use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter};
@@ -172,6 +172,17 @@ enum Cmd {
         /// Write the resulting tamper-proof audit log here.
         #[arg(long)]
         audit_out: Option<PathBuf>,
+        /// Seal every audit entry with this key (32-byte hex).
+        ///
+        /// The hash chain is derived, so whoever can edit the log can
+        /// recompute it; the seal is the part they cannot forge
+        /// (lex-os#54). Prefer --audit-key-file: a secret in argv is a
+        /// secret in `ps` and in your shell history.
+        #[arg(long, conflicts_with = "audit_key_file")]
+        audit_key: Option<String>,
+        /// Read the audit signing key from a file instead.
+        #[arg(long)]
+        audit_key_file: Option<PathBuf>,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -358,10 +369,53 @@ enum ManifestCmd {
 
 #[derive(Subcommand)]
 enum AuditCmd {
-    /// Verify the hash chain of an audit log file.
+    /// Verify an audit log: the hash chain always, plus the seals and a
+    /// checkpoint when you supply the keys to check them with.
+    ///
+    /// The three walls catch different things, and only the third
+    /// catches truncation (lex-os#54):
+    ///
+    /// * the chain    — an edited payload, a reordered or deleted entry
+    /// * the seals    — a holder who edited the log and recomputed it
+    /// * a checkpoint — entries dropped from the tail
     Verify {
         #[arg(long)]
         log: PathBuf,
+        /// Public key (32-byte hex) to check every entry's seal against.
+        /// Repeatable. Supplying none checks no seals at all and says so;
+        /// supplying some means *every* entry must be sealed by one of
+        /// them.
+        #[arg(long = "trusted-key")]
+        trusted_keys: Vec<String>,
+        /// A checkpoint written earlier by `lex-os audit checkpoint`.
+        /// Needs --trusted-key to verify its signature: a checkpoint
+        /// nobody vouched for is one the log's own holder could have
+        /// written.
+        #[arg(long)]
+        checkpoint: Option<PathBuf>,
+    },
+    /// Sign a commitment to this log's current length and head.
+    ///
+    /// Publish the result somewhere the log's holder cannot rewrite —
+    /// that is the entire mechanism. A checkpoint kept beside the log it
+    /// commits to proves nothing, because whoever truncates one can
+    /// replace the other.
+    Checkpoint {
+        #[arg(long)]
+        log: PathBuf,
+        /// Signing key as 32-byte hex (the secret from `capsule keygen`).
+        #[arg(long, conflicts_with = "key_file")]
+        key: Option<String>,
+        /// Read the signing key from a file instead, so it never reaches
+        /// argv or shell history.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// The moment being committed to, as seconds since the epoch.
+        /// Defaults to now.
+        #[arg(long)]
+        at: Option<u64>,
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Render an audit log as newline-delimited JSON (one entry per
     /// line) for a live, tailable external view.
@@ -384,6 +438,8 @@ fn main() {
         Cmd::Run {
             manifest,
             audit_out,
+            audit_key,
+            audit_key_file,
             namespaces_only,
             offline,
             agent,
@@ -397,6 +453,8 @@ fn main() {
             &fmt,
             manifest,
             audit_out,
+            audit_key,
+            audit_key_file,
             namespaces_only,
             offline,
             agent,
@@ -474,10 +532,41 @@ fn environment(namespaces_only: bool, offline: bool) -> Environment {
 
 // Knobs map 1:1 to CLI flags; a struct would just shuffle the names around.
 #[allow(clippy::too_many_arguments)]
+/// Read a 32-byte hex signing key from a flag or a file.
+///
+/// Two spellings because the flag is convenient and the file is the one
+/// to use: a secret in argv is a secret in `ps` output and in shell
+/// history, and an audit key that leaks is an audit log anyone can
+/// re-sign.
+fn load_signing_key(
+    key: Option<String>,
+    key_file: Option<PathBuf>,
+) -> Result<Option<SigningKey>, String> {
+    let hex_key = match (key, key_file) {
+        (None, None) => return Ok(None),
+        (Some(k), _) => k,
+        (None, Some(p)) => std::fs::read_to_string(&p)
+            .map_err(|e| format!("cannot read {}: {e}", p.display()))?
+            .trim()
+            .to_string(),
+    };
+    let seed: [u8; 32] = hex::decode(&hex_key)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| {
+            "the audit signing key must be 32 hex-encoded bytes (see `lex-os capsule keygen`)"
+                .to_string()
+        })?;
+    Ok(Some(SigningKey::from_bytes(&seed)))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     fmt: &OutputFormat,
     manifest_path: Option<PathBuf>,
     audit_out: Option<PathBuf>,
+    audit_key: Option<String>,
+    audit_key_file: Option<PathBuf>,
     namespaces_only: bool,
     offline: bool,
     agent_backend: AgentBackend,
@@ -490,6 +579,14 @@ fn cmd_run(
 ) -> ExitCode {
     let _ = &jail; // consumed only by the firecracker paths below
     let start = Instant::now();
+
+    // Read the key before anything runs: a session that was meant to be
+    // sealed and silently was not is worse than one that refused to
+    // start.
+    let audit_key = match load_signing_key(audit_key, audit_key_file) {
+        Ok(k) => k,
+        Err(e) => return emit_err(fmt, "run", ExitCode::InvalidArgs, &e),
+    };
 
     // Pick the backend up front, refusing rather than silently downgrading.
     // Then make the boundary unmistakable: if it isn't real, say so loudly.
@@ -534,7 +631,11 @@ fn cmd_run(
             #[cfg(not(feature = "firecracker"))]
             Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
         };
-        Supervisor::new(m, registry, p, SystemClock, Limits::default())
+        let s = Supervisor::new(m, registry, p, SystemClock, Limits::default());
+        match audit_key.clone() {
+            Some(k) => s.with_audit_key(k),
+            None => s,
+        }
     };
 
     // Commands exposed to the LLM agent (names only, for the system prompt).
@@ -1285,8 +1386,9 @@ fn cmd_audit(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
 fn cmd_audit_once(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
     let start = Instant::now();
     let (command, log_path) = match &what {
-        AuditCmd::Verify { log } => ("audit.verify", log.clone()),
+        AuditCmd::Verify { log, .. } => ("audit.verify", log.clone()),
         AuditCmd::Render { log } => ("audit.render", log.clone()),
+        AuditCmd::Checkpoint { log, .. } => ("audit.checkpoint", log.clone()),
         AuditCmd::Tail { .. } => unreachable!("tail is handled above"),
     };
     let text = match std::fs::read_to_string(&log_path) {
@@ -1298,24 +1400,18 @@ fn cmd_audit_once(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
         Err(e) => return emit_err(fmt, command, ExitCode::InvalidArgs, &e.to_string()),
     };
     match what {
-        AuditCmd::Verify { .. } => match parsed.verify() {
-            Ok(()) => {
-                let data =
-                    json!({ "verified": true, "entries": parsed.len(), "head": parsed.head() });
-                emit(
-                    &success_envelope("audit.verify", data, VERSION, Some(start), None),
-                    fmt,
-                );
-                ExitCode::Success
-            }
-            // A broken chain is a precondition failure, not a crash.
-            Err(e) => emit_err(
-                fmt,
-                "audit.verify",
-                ExitCode::PreconditionFailed,
-                &e.to_string(),
-            ),
-        },
+        AuditCmd::Verify {
+            trusted_keys,
+            checkpoint,
+            ..
+        } => audit_verify(fmt, start, parsed, trusted_keys, checkpoint),
+        AuditCmd::Checkpoint {
+            key,
+            key_file,
+            at,
+            out,
+            ..
+        } => audit_checkpoint(fmt, start, parsed, key, key_file, at, out),
         AuditCmd::Render { .. } => match parsed.to_ndjson() {
             // NDJSON is meant to be piped to a live viewer, so print it
             // raw to stdout regardless of --output.
@@ -1327,6 +1423,219 @@ fn cmd_audit_once(fmt: &OutputFormat, what: AuditCmd) -> ExitCode {
         },
         AuditCmd::Tail { .. } => unreachable!("tail is handled above"),
     }
+}
+
+/// Parse a repeatable `--trusted-key` list into keys.
+fn parse_trusted(keys: &[String]) -> Result<Vec<VerifyingKey>, String> {
+    keys.iter()
+        .map(|k| {
+            hex::decode(k)
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .ok_or_else(|| format!("--trusted-key {k} is not 32 hex-encoded bytes"))
+                .and_then(|b| {
+                    VerifyingKey::from_bytes(&b)
+                        .map_err(|_| format!("--trusted-key {k} is not an Ed25519 public key"))
+                })
+        })
+        .collect()
+}
+
+/// The three walls, each reported separately.
+///
+/// Separately because they mean different things, and a single
+/// `verified: true` would let a reader believe a log was held to walls
+/// nobody asked for. `seals` and `checkpoint` say `not-checked` when no
+/// key was supplied — which is *not* the same as passing, and the JSON
+/// says so in a word rather than by omission.
+fn audit_verify(
+    fmt: &OutputFormat,
+    start: Instant,
+    log: AuditLog,
+    trusted_keys: Vec<String>,
+    checkpoint: Option<PathBuf>,
+) -> ExitCode {
+    if let Err(e) = log.verify() {
+        return emit_err(
+            fmt,
+            "audit.verify",
+            ExitCode::PreconditionFailed,
+            &e.to_string(),
+        );
+    }
+
+    let trusted = match parse_trusted(&trusted_keys) {
+        Ok(t) => t,
+        Err(e) => return emit_err(fmt, "audit.verify", ExitCode::InvalidArgs, &e),
+    };
+
+    let seals = if trusted.is_empty() {
+        // Said out loud. A log whose seals nobody checked is not a log
+        // whose seals passed, and the difference is the whole point of
+        // having them.
+        json!({"checked": false, "sealed_entries": log.sealed_count(), "entries": log.len()})
+    } else {
+        match log.verify_seals(&trusted) {
+            Ok(()) => json!({"checked": true, "verified": true, "entries": log.len()}),
+            Err(e) => {
+                return emit_err(
+                    fmt,
+                    "audit.verify",
+                    ExitCode::PreconditionFailed,
+                    &e.to_string(),
+                )
+            }
+        }
+    };
+
+    let checkpoint_result = match checkpoint {
+        None => json!({"checked": false}),
+        Some(path) => {
+            if trusted.is_empty() {
+                return emit_err(
+                    fmt,
+                    "audit.verify",
+                    ExitCode::InvalidArgs,
+                    "--checkpoint needs at least one --trusted-key: a checkpoint nobody \
+                     vouched for is one the log's own holder could have written, and \
+                     checking a log against it would prove nothing",
+                );
+            }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => return emit_err(fmt, "audit.verify", ExitCode::NotFound, &e.to_string()),
+            };
+            let cp: Checkpoint = match serde_json::from_str(&text) {
+                Ok(c) => c,
+                Err(e) => {
+                    return emit_err(fmt, "audit.verify", ExitCode::InvalidArgs, &e.to_string())
+                }
+            };
+            // Any one of the trusted keys may have signed it.
+            let verified = trusted.iter().find_map(|k| cp.verify(k).ok());
+            let Some(verified) = verified else {
+                return emit_err(
+                    fmt,
+                    "audit.verify",
+                    ExitCode::PreconditionFailed,
+                    "the checkpoint is not signed by any of the trusted keys",
+                );
+            };
+            match log.verify_against(&verified) {
+                Ok(()) => json!({
+                    "checked": true,
+                    "verified": true,
+                    "committed_len": verified.as_checkpoint().len,
+                    "committed_head": verified.as_checkpoint().head,
+                }),
+                Err(e) => {
+                    return emit_err(
+                        fmt,
+                        "audit.verify",
+                        ExitCode::PreconditionFailed,
+                        &e.to_string(),
+                    )
+                }
+            }
+        }
+    };
+
+    let data = json!({
+        "verified": true,
+        "entries": log.len(),
+        "head": log.head(),
+        "chain": {"checked": true, "verified": true},
+        "seals": seals,
+        "checkpoint": checkpoint_result,
+    });
+    emit(
+        &success_envelope("audit.verify", data, VERSION, Some(start), None),
+        fmt,
+    );
+    ExitCode::Success
+}
+
+fn audit_checkpoint(
+    fmt: &OutputFormat,
+    start: Instant,
+    log: AuditLog,
+    key: Option<String>,
+    key_file: Option<PathBuf>,
+    at: Option<u64>,
+    out: Option<PathBuf>,
+) -> ExitCode {
+    let hex_key = match (key, key_file) {
+        (Some(k), _) => k,
+        (None, Some(path)) => match std::fs::read_to_string(&path) {
+            Ok(t) => t.trim().to_string(),
+            Err(e) => return emit_err(fmt, "audit.checkpoint", ExitCode::NotFound, &e.to_string()),
+        },
+        (None, None) => {
+            return emit_err(
+                fmt,
+                "audit.checkpoint",
+                ExitCode::InvalidArgs,
+                "needs --key or --key-file",
+            )
+        }
+    };
+    let seed: [u8; 32] = match hex::decode(&hex_key)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    {
+        Some(b) => b,
+        None => {
+            return emit_err(
+                fmt,
+                "audit.checkpoint",
+                ExitCode::InvalidArgs,
+                "the signing key must be 32 hex-encoded bytes (see `lex-os capsule keygen`)",
+            )
+        }
+    };
+    let signing_key = SigningKey::from_bytes(&seed);
+    let at = at.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
+    let cp = log.checkpoint(&signing_key, at);
+    let json_text = match serde_json::to_string_pretty(&cp) {
+        Ok(t) => t,
+        Err(e) => {
+            return emit_err(
+                fmt,
+                "audit.checkpoint",
+                ExitCode::GeneralError,
+                &e.to_string(),
+            )
+        }
+    };
+    if let Some(path) = &out {
+        if let Err(e) = std::fs::write(path, &json_text) {
+            return emit_err(
+                fmt,
+                "audit.checkpoint",
+                ExitCode::GeneralError,
+                &e.to_string(),
+            );
+        }
+    }
+    let data = json!({
+        "len": cp.len,
+        "head": cp.head,
+        "at": cp.at,
+        "signer": cp.signer,
+        "out": out.as_ref().map(|p| p.display().to_string()),
+        "checkpoint": serde_json::from_str::<serde_json::Value>(&json_text).unwrap_or(json!(null)),
+        "note": "publish this where the log's holder cannot rewrite it; kept beside the log it proves nothing",
+    });
+    emit(
+        &success_envelope("audit.checkpoint", data, VERSION, Some(start), None),
+        fmt,
+    );
+    ExitCode::Success
 }
 
 /// Follow `log`, printing existing entries as NDJSON and then polling every

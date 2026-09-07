@@ -55,6 +55,7 @@ const HELP_PATHS: &[&[&str]] = &[
     &["manifest", "narrow"],
     &["audit"],
     &["audit", "verify"],
+    &["audit", "checkpoint"],
     &["audit", "render"],
     &["audit", "tail"],
     &["check"],
