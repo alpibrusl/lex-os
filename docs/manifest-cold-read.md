@@ -50,14 +50,29 @@ end of this.
 
 ## Pick one
 
-Any of these, or something else with a real deployment. What matters is that
-you didn't write it.
+All three are public, so you can read them without asking anyone for access.
+What matters is that you didn't write it.
 
 | Service | Why it's interesting |
 | --- | --- |
+| `lex-attest` | Signing sidecar. Holds keys and publishes to caller-supplied destinations, so the isolation floor and the egress allowlist are both real decisions. |
 | `lex-oms` | HTTP order management server. Talks to several other services, so the egress allowlist is a real decision. |
-| `lex-telemetry` | Ingests device data. High volume, which makes the budget a real decision. |
-| `lex-attest` | Signing sidecar. Holds keys, so the isolation floor is a real decision. |
+| `lex-guard` | Spending guardrails. Budget-shaped by nature, which puts pressure on the budget fields. |
+
+### None of them ships a deployment spec, and that's expected
+
+You will not find an image digest, a Secret name, a NetworkPolicy, a
+ServiceAccount or a parent manifest in any of these repositories. The
+manifest needs all of them.
+
+**Invent what you need, and log each invention.** Writing
+`registry.example/thing@sha256:...` because nothing told you the real one is a
+finding, not a failure — and it's a more useful finding than anything you'll
+hit inside the gate. Note where the information *should* have come from.
+
+A previous pass stopped here and called it, which was the right call. If you
+reach the point where the manifest is more fiction than fact, say so and stop:
+that conclusion is worth more than a manifest built on invented inputs.
 
 ---
 
