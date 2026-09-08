@@ -17,14 +17,16 @@ use std::rc::Rc;
 
 use lex_bytecode::vm::EffectHandler;
 use lex_bytecode::Value;
-use lex_os_audit::AuditLog;
 use lex_os_perimeter::SimulatedPerimeter;
+use lex_os_supervisor::SessionAudit;
 use lex_os_supervisor::{BudgetLedger, CommandRegistry, Decision, Mediator, SystemClock};
 
 /// Session state the handler threads through the gate and the caller reads
 /// back after the run completes.
 pub struct MediationState {
-    pub audit: AuditLog,
+    /// Wrapped so an inbox mediation persists as it decides, the
+    /// same as a supervised session (#88).
+    pub audit: SessionAudit,
     pub ledger: BudgetLedger,
     /// Effects the entrypoint actually performed, in execution order
     /// (`kind.op`) — the faithful record the declared-effect stand-in couldn't
@@ -60,7 +62,10 @@ impl MediatingHandler {
 
 impl EffectHandler for MediatingHandler {
     fn dispatch(&mut self, kind: &str, op: &str, _args: Vec<Value>) -> Result<Value, String> {
-        self.state.borrow_mut().performed.push(format!("{kind}.{op}"));
+        self.state
+            .borrow_mut()
+            .performed
+            .push(format!("{kind}.{op}"));
         match classify(kind, op) {
             InBox::Mediated { command, stub } => {
                 let mediator = Mediator::new(&self.registry, &self.perimeter, &self.clock);
@@ -245,6 +250,7 @@ mod tests {
     use lex_os_audit::AuditLog;
     use lex_os_manifest::{Budget, Grant, Level};
     use lex_os_perimeter::{Perimeter, SandboxPolicy};
+    use lex_os_supervisor::SessionAudit;
 
     fn handler(grant: Grant) -> (MediatingHandler, Rc<RefCell<MediationState>>) {
         let mut perimeter = SimulatedPerimeter::new();
@@ -256,7 +262,7 @@ mod tests {
         let mut budget = Budget::research_default();
         budget.max_money_cents = 100;
         let state = Rc::new(RefCell::new(MediationState {
-            audit: AuditLog::new(),
+            audit: SessionAudit::new(AuditLog::new()),
             ledger: BudgetLedger::new(budget, 0),
             performed: Vec::new(),
         }));
@@ -272,7 +278,13 @@ mod tests {
         assert!(matches!(v, Value::Variant { ref name, .. } if name == "Ok"));
         // The effect was recorded and the gate logged the mediated command.
         assert_eq!(state.borrow().performed, vec!["net.get"]);
-        assert!(state.borrow().audit.to_ndjson().unwrap().contains("net.fetch"));
+        assert!(state
+            .borrow()
+            .audit
+            .log()
+            .to_ndjson()
+            .unwrap()
+            .contains("net.fetch"));
     }
 
     #[test]
@@ -285,7 +297,10 @@ mod tests {
     #[test]
     fn stdout_runs_in_process_without_a_command() {
         let (mut h, _s) = handler(Grant::new(Level::None, Level::None, Level::None));
-        assert!(matches!(h.dispatch("io", "print", vec![]).unwrap(), Value::Unit));
+        assert!(matches!(
+            h.dispatch("io", "print", vec![]).unwrap(),
+            Value::Unit
+        ));
     }
 
     #[test]
@@ -305,6 +320,7 @@ mod tests {
         assert!(state
             .borrow()
             .audit
+            .log()
             .to_ndjson()
             .unwrap()
             .contains("exec.shell"));
@@ -319,10 +335,19 @@ mod tests {
     fn fs_reads_are_gated_at_read_only_and_writes_at_read_write() {
         // Read-only grant: traversal reads pass, mutations are sealed.
         let (mut h, state) = handler(Grant::new(Level::ReadOnly, Level::None, Level::None));
-        assert!(matches!(h.dispatch("fs", "exists", vec![]).unwrap(), Value::Bool(_)));
+        assert!(matches!(
+            h.dispatch("fs", "exists", vec![]).unwrap(),
+            Value::Bool(_)
+        ));
         assert!(matches!(h.dispatch("fs", "list_dir", vec![]).unwrap(),
             Value::Variant { ref name, .. } if name == "Ok"));
-        assert!(state.borrow().audit.to_ndjson().unwrap().contains("fs.read"));
+        assert!(state
+            .borrow()
+            .audit
+            .log()
+            .to_ndjson()
+            .unwrap()
+            .contains("fs.read"));
         // mkdir needs read-write; a read-only grant seals it at the edge.
         let err = h.dispatch("fs", "mkdir_p", vec![]).unwrap_err();
         assert!(err.contains("sealed at the edge"), "got: {err}");
@@ -336,7 +361,10 @@ mod tests {
     #[test]
     fn fs_is_sealed_when_the_grant_has_no_filesystem() {
         let (mut h, _s) = handler(Grant::new(Level::None, Level::Full, Level::Full));
-        assert!(h.dispatch("fs", "exists", vec![]).unwrap_err().contains("sealed at the edge"));
+        assert!(h
+            .dispatch("fs", "exists", vec![])
+            .unwrap_err()
+            .contains("sealed at the edge"));
     }
 
     #[test]
@@ -368,7 +396,10 @@ mod tests {
             Value::Variant { ref name, .. } if name == "Ok"));
         assert!(matches!(h.dispatch("io", "readline", vec![]).unwrap(),
             Value::Variant { ref name, .. } if name == "None"));
-        assert!(matches!(h.dispatch("io", "argv", vec![]).unwrap(), Value::List(_)));
+        assert!(matches!(
+            h.dispatch("io", "argv", vec![]).unwrap(),
+            Value::List(_)
+        ));
         // None of the ungated io effects logged a mediated command.
         // (only the performed list grows)
     }

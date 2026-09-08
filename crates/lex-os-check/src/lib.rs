@@ -268,7 +268,9 @@ fn submit(report :: Str) -> [net, net("results.demo.internal")] Result[Str, Str]
         let m = manifest(Grant::new(Level::Full, Level::Allowlist, Level::Full))
             .with_egress(vec!["results.demo.internal:443".into()]);
         let report = check_source_against_manifest(src, &m).unwrap();
-        assert!(report.net_hosts.contains(&"results.demo.internal".to_string()));
+        assert!(report
+            .net_hosts
+            .contains(&"results.demo.internal".to_string()));
     }
 
     #[test]

@@ -375,9 +375,7 @@ impl FirecrackerPerimeter {
         //      Older Firecracker builds have no `/entropy`; treat a refusal
         //      as a warning rather than a failed provision, so a host on an
         //      older binary still boots — slowly, and audibly.
-        if let Err(e) = with_socket(&lay.api_sock_host, |s| {
-            put_json(s, "/entropy", r#"{}"#)
-        }) {
+        if let Err(e) = with_socket(&lay.api_sock_host, |s| put_json(s, "/entropy", r#"{}"#)) {
             eprintln!(
                 "lex-os perimeter: this firecracker refused /entropy ({e}); the guest will \
                  have little randomness and anything calling getrandom(2) early may block"

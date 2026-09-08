@@ -33,6 +33,7 @@ use lex_os_capsule::{
 use lex_os_manifest::Manifest;
 use lex_os_perimeter::{Perimeter, SandboxPolicy, SimulatedPerimeter};
 use lex_os_resolver::{resolve, Environment};
+use lex_os_supervisor::SessionAudit;
 use lex_os_supervisor::SystemClock;
 
 use crate::demo::demo_registry;
@@ -498,15 +499,7 @@ fn install(
         // effect it performs through the supervisor gate (not a stand-in built
         // from the declared effects).
         return run_in_box(
-            fmt,
-            start,
-            &installed,
-            &consumer,
-            &env,
-            audit,
-            &audit_out,
-            ep,
-            &source,
+            fmt, start, &installed, &consumer, &env, audit, &audit_out, ep, &source,
         );
     }
 
@@ -608,20 +601,30 @@ fn run_in_box(
     entrypoint: &str,
     source: &str,
 ) -> ExitCode {
+    use lex_os_supervisor::{BudgetLedger, Clock};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use lex_os_supervisor::{BudgetLedger, Clock};
 
     // Resolve + provision the (simulated) box from the effective manifest, the
     // same shape `run_under_supervisor` did, so the perimeter capability gate
     // is live before the first effect.
     if let Err(e) = resolve(&installed.manifest, env) {
-        return emit_err(fmt, "capsule.install", ExitCode::PreconditionFailed, &e.to_string());
+        return emit_err(
+            fmt,
+            "capsule.install",
+            ExitCode::PreconditionFailed,
+            &e.to_string(),
+        );
     }
     let policy = SandboxPolicy::from_manifest(&installed.manifest);
     let mut perimeter = SimulatedPerimeter::new();
     if let Err(e) = perimeter.provision(policy) {
-        return emit_err(fmt, "capsule.install", ExitCode::PreconditionFailed, &e.to_string());
+        return emit_err(
+            fmt,
+            "capsule.install",
+            ExitCode::PreconditionFailed,
+            &e.to_string(),
+        );
     }
     let mut audit = audit;
     audit.append(Event::Provisioned {
@@ -650,7 +653,7 @@ fn run_in_box(
     let clock = SystemClock;
     let ledger = BudgetLedger::new(installed.manifest.budget, clock.now_secs());
     let state = Rc::new(RefCell::new(crate::inbox::MediationState {
-        audit,
+        audit: SessionAudit::new(audit),
         ledger,
         performed: Vec::new(),
     }));
@@ -668,9 +671,13 @@ fn run_in_box(
         Err(e) => (false, e.to_string()),
     };
     st.audit.append(Event::SessionEnded {
-        outcome: if run_ok { "goal_met".into() } else { "halted".into() },
+        outcome: if run_ok {
+            "goal_met".into()
+        } else {
+            "halted".into()
+        },
     });
-    write_audit(&st.audit, audit_out);
+    write_audit(st.audit.log(), audit_out);
 
     let data = json!({
         "installed": true,
@@ -690,9 +697,9 @@ fn run_in_box(
         "run_detail": run_detail,
         "commands_used": st.ledger.commands_used(),
         // One continuous, tamper-evident chain: install decision → session.
-        "audit_entries": st.audit.len(),
-        "audit_head": st.audit.head(),
-        "audit_verified": st.audit.verify().is_ok(),
+        "audit_entries": st.audit.log().len(),
+        "audit_head": st.audit.log().head(),
+        "audit_verified": st.audit.log().verify().is_ok(),
         "audit_out": audit_out.as_ref().map(|p| p.display().to_string()),
     });
     emit(

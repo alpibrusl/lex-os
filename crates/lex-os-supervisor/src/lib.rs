@@ -29,6 +29,96 @@ pub use skill::{mediate_skill, SkillVerdict};
 pub use vsock_agent::VsockAgent;
 
 use lex_os_audit::{AuditLog, Event, SigningKey};
+
+/// The session's audit log, and somewhere durable for it to land as it
+/// grows (#88).
+///
+/// # Why this type exists at all
+///
+/// `Supervisor::run` used to hold the whole session's `AuditLog` in
+/// memory and let the caller write it once, at the end. Two
+/// consequences, and the second is the worse one:
+///
+/// - a crash lost the entire record, including the events leading up to
+///   whatever caused it — which are the ones worth having;
+/// - nothing outside the process could see the chain grow. `lex-os-audit`
+///   says its tamper-evidence rests on the log living "outside the box,
+///   owned by the supervisor", and for the length of a run it lived in
+///   the supervisor's heap where nobody had seen it. `audit tail` knew
+///   how to follow a file that did not exist yet.
+///
+/// # Why the sink is here and not on `Chain`
+///
+/// `Chain` is a pure data structure and putting a file handle in it
+/// would be the wrong trade — it would also mean deciding what `clone`
+/// of a chain-with-a-file means. So the plumbing sits beside the chain,
+/// in the type the supervisor already threads through every decision.
+///
+/// The point of wrapping rather than adding a `write` call at each of
+/// the twenty-nine append sites is that a call site cannot forget. Same
+/// reasoning as [`lex_os_audit::Chain::sealed_with`]: state it once,
+/// and every append inherits it.
+pub struct SessionAudit {
+    log: AuditLog,
+    sink: Option<std::path::PathBuf>,
+}
+
+impl SessionAudit {
+    pub fn new(log: AuditLog) -> Self {
+        Self { log, sink: None }
+    }
+
+    /// Append every entry to this file as it is written, one NDJSON
+    /// line each — the shape `audit tail` already follows.
+    pub fn teed_to(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.sink = Some(path.into());
+        self
+    }
+
+    /// Append, then persist, then hand back the head.
+    ///
+    /// A failed write is reported and does not stop the session. The
+    /// alternative is aborting a run because a log file could not be
+    /// opened, which trades a recorded session for no session at all;
+    /// the entry is still in the in-memory chain the caller writes at
+    /// the end, so the failure costs durability, not the record.
+    pub fn append(&mut self, event: Event) -> String {
+        let head = self.log.append(event);
+        if let Some(path) = &self.sink {
+            if let Err(e) = Self::append_line(path, &self.log) {
+                eprintln!(
+                    "warning: could not append to the audit sink {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        head
+    }
+
+    fn append_line(path: &std::path::Path, log: &AuditLog) -> std::io::Result<()> {
+        use std::io::Write;
+        let Some(entry) = log.entries().last() else {
+            return Ok(());
+        };
+        let line = serde_json::to_string(entry)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(f, "{line}")?;
+        // The point is that a crash after this call still has the entry.
+        f.sync_all()
+    }
+
+    pub fn log(&self) -> &AuditLog {
+        &self.log
+    }
+
+    pub fn into_log(self) -> AuditLog {
+        self.log
+    }
+}
 use lex_os_manifest::{
     Dimension, EscalationError, EscalationGrant, Grant, Manifest, Reversibility,
 };
@@ -254,6 +344,10 @@ pub struct Supervisor<P: Perimeter, C: Clock> {
     /// key to does not invent one, and the log says so by carrying no
     /// seals rather than by carrying unverifiable ones.
     audit_key: Option<SigningKey>,
+    /// Where each entry lands as it is appended (#88). `None`
+    /// keeps the old behaviour: the record exists only once the
+    /// session ends, and a crash takes it with it.
+    audit_sink: Option<std::path::PathBuf>,
 }
 
 impl<P: Perimeter, C: Clock> Supervisor<P, C> {
@@ -271,6 +365,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
             clock,
             limits,
             seed_audit: None,
+            audit_sink: None,
             audit_key: None,
         }
     }
@@ -301,6 +396,22 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         self
     }
 
+    /// Append each audit entry to `path` as it happens (#88).
+    ///
+    /// NDJSON, one line per entry, `fsync`ed — the shape `audit tail`
+    /// follows. Without it the session's record exists only in memory
+    /// until the run ends, so a crash loses exactly the entries that
+    /// would explain it, and nothing outside the process can see the
+    /// chain grow while it matters.
+    ///
+    /// The file at the end of a run is not a substitute for
+    /// `--audit-out`: this is an append log, and the canonical chain is
+    /// still the one the caller writes.
+    pub fn with_audit_sink(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.audit_sink = Some(path.into());
+        self
+    }
+
     /// Drive an agent to a terminal [`Outcome`]. This is the one
     /// end-to-end mediation loop the whole design reduces to (design doc
     /// §10): mediated, policy-checked, logged commands under a hard
@@ -325,6 +436,12 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         if let Some(key) = self.audit_key.take() {
             audit = audit.sealed_with(key);
         }
+        // Wrapped once, here, for the same reason the key is set once
+        // here: every `append` below persists without deciding to (#88).
+        let mut audit = match self.audit_sink.take() {
+            Some(path) => SessionAudit::new(audit).teed_to(path),
+            None => SessionAudit::new(audit),
+        };
         let mut ledger = BudgetLedger::new(self.manifest.budget, self.clock.now_secs());
         let mut checkpoint = Checkpoint::default();
         let mut exec_result: Option<ExecResult> = None;
@@ -550,7 +667,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
 
         Ok(SessionReport {
             outcome,
-            audit,
+            audit: audit.into_log(),
             ledger,
             reprovisions,
             exec_result,
@@ -561,7 +678,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
     /// action passes through. Order matters — log the request first, so
     /// even a denied or budget-blocked attempt is in the legible
     /// history.
-    fn mediate(&self, name: &str, audit: &mut AuditLog, ledger: &mut BudgetLedger) -> Decision {
+    fn mediate(&self, name: &str, audit: &mut SessionAudit, ledger: &mut BudgetLedger) -> Decision {
         Mediator::new(&self.registry, &self.perimeter, &self.clock).mediate(name, audit, ledger)
     }
 }
@@ -591,7 +708,12 @@ impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
 
     /// Apply the gate to one command, appending the same events and returning
     /// the same [`Decision`] the supervisor loop would.
-    pub fn mediate(&self, name: &str, audit: &mut AuditLog, ledger: &mut BudgetLedger) -> Decision {
+    pub fn mediate(
+        &self,
+        name: &str,
+        audit: &mut SessionAudit,
+        ledger: &mut BudgetLedger,
+    ) -> Decision {
         self.mediate_inner(name, audit, ledger, None)
     }
 
@@ -605,7 +727,7 @@ impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
     pub fn mediate_escalated(
         &self,
         name: &str,
-        audit: &mut AuditLog,
+        audit: &mut SessionAudit,
         ledger: &mut BudgetLedger,
         slot: &mut EscalationSlot,
         manifest_grant: &Grant,
@@ -616,7 +738,7 @@ impl<'a, P: Perimeter, C: Clock> Mediator<'a, P, C> {
     fn mediate_inner(
         &self,
         name: &str,
-        audit: &mut AuditLog,
+        audit: &mut SessionAudit,
         ledger: &mut BudgetLedger,
         mut escalation: Option<(&mut EscalationSlot, &Grant)>,
     ) -> Decision {
@@ -742,7 +864,7 @@ impl EscalationSlot {
         &mut self,
         esc: EscalationGrant,
         manifest_grant: &Grant,
-        audit: &mut AuditLog,
+        audit: &mut SessionAudit,
     ) -> Result<(), EscalationError> {
         match esc.validate(manifest_grant, &esc.command) {
             Err(e) => {
@@ -1472,7 +1594,7 @@ mod tests {
         let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
         let (reg, per, clock, m) = escalation_ctx(grant);
         let med = Mediator::new(&reg, &per, &clock);
-        let mut audit = AuditLog::new();
+        let mut audit = SessionAudit::new(AuditLog::new());
         let mut ledger = BudgetLedger::new(m.budget, 0);
         let mut slot = EscalationSlot::new();
 
@@ -1501,7 +1623,7 @@ mod tests {
 
         // The record reads: refusal → grant (with resolver) → consumption
         // → allow → refusal, in that order.
-        let ks = kinds(&audit);
+        let ks = kinds(audit.log());
         let order = [
             "CommandDenied",
             "EscalationGranted",
@@ -1516,14 +1638,14 @@ mod tests {
             }
         }
         assert_eq!(idx, order.len(), "audit order wrong: {ks:?}");
-        audit.verify().unwrap();
+        audit.log().verify().unwrap();
     }
 
     #[test]
     fn non_widening_escalation_is_rejected_structurally() {
         let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
         let (_, _, _, m) = escalation_ctx(grant);
-        let mut audit = AuditLog::new();
+        let mut audit = SessionAudit::new(AuditLog::new());
         let mut slot = EscalationSlot::new();
         // Asking for exactly what the manifest already grants must never
         // reach a human: rejected at arm time, slot stays empty.
@@ -1537,7 +1659,7 @@ mod tests {
             Err(EscalationError::NotWidening)
         );
         assert!(!slot.is_armed());
-        let ks = kinds(&audit);
+        let ks = kinds(audit.log());
         assert!(ks.contains(&"EscalationRejected".to_string()));
     }
 
@@ -1545,7 +1667,7 @@ mod tests {
     fn narrowing_and_anonymous_escalations_are_rejected() {
         let grant = Grant::new(Level::ReadWrite, Level::None, Level::None);
         let (_, _, _, m) = escalation_ctx(grant);
-        let mut audit = AuditLog::new();
+        let mut audit = SessionAudit::new(AuditLog::new());
         let mut slot = EscalationSlot::new();
         // Narrows filesystem while widening network: refused.
         let narrowing = EscalationGrant {
@@ -1575,7 +1697,7 @@ mod tests {
         let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
         let (reg, per, clock, m) = escalation_ctx(grant);
         let med = Mediator::new(&reg, &per, &clock);
-        let mut audit = AuditLog::new();
+        let mut audit = SessionAudit::new(AuditLog::new());
         let mut ledger = BudgetLedger::new(m.budget, 0);
         let mut slot = EscalationSlot::new();
         let esc = EscalationGrant {
@@ -1606,7 +1728,7 @@ mod tests {
         let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
         let (reg, per, clock, m) = escalation_ctx(grant);
         let med = Mediator::new(&reg, &per, &clock);
-        let mut audit = AuditLog::new();
+        let mut audit = SessionAudit::new(AuditLog::new());
         let mut ledger = BudgetLedger::new(m.budget, 0);
         let mut slot = EscalationSlot::new();
         let esc = EscalationGrant {
@@ -1627,7 +1749,7 @@ mod tests {
         let grant = Grant::new(Level::ReadOnly, Level::None, Level::None);
         let (reg, per, clock, m) = escalation_ctx(grant);
         let med = Mediator::new(&reg, &per, &clock);
-        let mut audit = AuditLog::new();
+        let mut audit = SessionAudit::new(AuditLog::new());
         let mut ledger = BudgetLedger::new(m.budget, 0);
         let mut slot = EscalationSlot::new();
         // Widens network, but only to Loopback — net.fetch needs Allowlist.
@@ -1641,7 +1763,7 @@ mod tests {
         assert!(matches!(d, Decision::Denied(_)));
         // One-shot regardless of outcome: dead afterwards.
         assert!(!slot.is_armed());
-        let ks = kinds(&audit);
+        let ks = kinds(audit.log());
         assert!(ks.contains(&"EscalationConsumed".to_string()));
     }
 
@@ -1671,5 +1793,80 @@ mod tests {
             "exec outcome must be classified in the record: {ks:?}"
         );
         report.audit.verify().unwrap();
+    }
+
+    // ── The record exists before the session ends (#88) ───────────────
+
+    fn sink_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("lex-os-sink-{}-{tag}.ndjson", std::process::id()))
+    }
+
+    /// The property: an entry is durable when it is appended, not when
+    /// the run finishes. Read the file back while the "session" is still
+    /// going — which is exactly what a crash, or `audit tail`, does.
+    #[test]
+    fn entries_reach_the_file_as_they_are_appended() {
+        let path = sink_path("live");
+        let _ = std::fs::remove_file(&path);
+        let mut audit = SessionAudit::new(AuditLog::new()).teed_to(&path);
+
+        audit.append(Event::Provisioned {
+            manifest_id: "m1".into(),
+            backend: "simulated".into(),
+            reprovision: false,
+        });
+        let after_one = std::fs::read_to_string(&path).expect("the file exists already");
+        assert_eq!(after_one.lines().count(), 1, "one entry, one line");
+
+        audit.append(Event::Destroyed {
+            reason: "done".into(),
+        });
+        let after_two = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after_two.lines().count(), 2);
+        assert!(after_two.contains("Provisioned") || after_two.contains("provisioned"));
+
+        // Nothing was dropped: the in-memory chain and the file agree.
+        assert_eq!(audit.log().len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Each line is a complete entry on its own, because a reader that
+    /// arrives mid-session (or after a crash) has no other framing.
+    #[test]
+    fn every_line_is_an_entry_a_reader_can_parse_alone() {
+        let path = sink_path("ndjson");
+        let _ = std::fs::remove_file(&path);
+        let mut audit = SessionAudit::new(AuditLog::new()).teed_to(&path);
+        for i in 0..3 {
+            audit.append(Event::Destroyed {
+                reason: format!("r{i}"),
+            });
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for line in text.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("a whole entry per line");
+            assert!(v.get("seq").is_some() && v.get("hash").is_some(), "{line}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without a sink the behaviour is exactly what it was: the record
+    /// lives in memory until the caller writes it.
+    #[test]
+    fn no_sink_writes_nothing() {
+        let mut audit = SessionAudit::new(AuditLog::new());
+        audit.append(Event::Destroyed { reason: "x".into() });
+        assert_eq!(audit.log().len(), 1);
+    }
+
+    /// A sink that cannot be written must not take the session with it.
+    /// Losing durability is bad; refusing to run because a log file is
+    /// unopenable is worse, and it is not the supervisor's call to make.
+    #[test]
+    fn an_unwritable_sink_does_not_abort_the_session() {
+        let mut audit =
+            SessionAudit::new(AuditLog::new()).teed_to("/nonexistent-dir-lex-os/sink.ndjson");
+        audit.append(Event::Destroyed { reason: "x".into() });
+        assert_eq!(audit.log().len(), 1, "the entry is still in the chain");
     }
 }
