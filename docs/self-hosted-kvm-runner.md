@@ -107,9 +107,22 @@ tar xzf runner.tar.gz
   --url https://github.com/alpibrusl/lex-os \
   --token <TOKEN> \
   --labels kvm \
-  --name "$(hostname)-kvm" \
+  --name kvm-1 \
   --unattended
 ```
+
+**Do not name the runner after the machine.** On a public repository every
+workflow run page is readable without authentication, and the log opens
+with `Runner name: '<name>'`. `--name "$(hostname)-kvm"` — which this
+runbook used to suggest — therefore publishes the hostname of a machine
+somebody owns, next to a document explaining that it has passwordless
+sudo. `kvm-1` says everything the workflow needs to know.
+
+The same logs carry the runner's working directory, so the account name
+appears in every path. If that matters to you, run the runner as a
+dedicated service account rather than a personal login; the runbook does
+not assume one either way, but the choice is visible forever once a run
+is published.
 
 The `self-hosted` label is added automatically; `--labels kvm` is what matches
 the workflow's `runs-on: [self-hosted, kvm]`.
