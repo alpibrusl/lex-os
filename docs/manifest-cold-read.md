@@ -80,10 +80,21 @@ that conclusion is worth more than a manifest built on invented inputs.
 
 | | |
 | --- | --- |
+| **Seven working manifests** | `lex-os/demo/*.json` |
 | The runtime, the grant, and the boundary | `lex-os/README.md` |
 | The gate between plan and apply | `lex-iac/README.md` |
 | The Kubernetes admission wall | `lex-k8s/README.md` |
 | What the box defends against, and what it doesn't | `lex-iac/docs/threat-model.md` |
+
+**Start with `demo/manifest.json`.** The first two participants both missed
+those files and reconstructed the format from prose instead — and invented two
+different, mutually incompatible schemas doing it. Reading one real manifest
+first is not cheating; it's what anyone would actually do.
+
+Note what that means for the log, though: with an example in front of you, the
+schema questions stop being interesting and the *semantic* ones get sharper.
+"Which level do I need, and why" is the question worth recording — not "what
+shape is this field".
 
 Then, once you have a manifest:
 
