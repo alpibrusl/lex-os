@@ -1,5 +1,11 @@
 /target
 **/*.rs.bk
+# lex-code's own session trail (.lex/sessions/*.db) when driven via
+# `lex-os exec` from this checkout — a build/run artifact, not source.
+# Landed in the tree once already (#86), harmlessly (a trivial local
+# smoke test, no secrets), but that was luck, not something to rely on
+# for the next person who runs the same command from here.
+.lex/
 # Cargo.lock IS committed: lex-os ships a binary, so a fresh clone should build
 # the exact same dependency versions (incl. the pinned lex-lang/acli git revs).
 .DS_Store
