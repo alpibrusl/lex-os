@@ -153,7 +153,9 @@ impl<R: BufRead + Send, W: Write + Send> Transport for StreamTransport<R, W> {
     fn send_decision(&mut self, decision: &crate::msg::SkillDecisionMsg) -> anyhow::Result<()> {
         let mut line = serde_json::to_string(decision).context("serialise decision")?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).context("write decision")?;
+        self.writer
+            .write_all(line.as_bytes())
+            .context("write decision")?;
         self.writer.flush().context("flush")?;
         Ok(())
     }
@@ -201,7 +203,9 @@ impl<R: BufRead + Send, W: Write + Send> GuestTransport for StreamGuestTransport
     fn send_outcome(&mut self, outcome: &crate::msg::SkillOutcomeMsg) -> anyhow::Result<()> {
         let mut line = serde_json::to_string(outcome).context("serialise outcome")?;
         line.push('\n');
-        self.writer.write_all(line.as_bytes()).context("write outcome")?;
+        self.writer
+            .write_all(line.as_bytes())
+            .context("write outcome")?;
         self.writer.flush().context("flush")?;
         Ok(())
     }
@@ -259,14 +263,21 @@ mod tests {
         let (mut host, mut guest) = simulated_pair();
 
         // Host decides, guest receives.
-        host.send_decision(&SkillDecisionMsg { allowed: true, reason: None }).unwrap();
+        host.send_decision(&SkillDecisionMsg {
+            allowed: true,
+            reason: None,
+        })
+        .unwrap();
         let d = guest.recv_decision().unwrap();
         assert!(d.allowed);
 
         // Guest reports outcome, host receives.
-        guest.send_outcome(&SkillOutcomeMsg {
-            outcome: "reached".into(), observation: "{}".into(),
-        }).unwrap();
+        guest
+            .send_outcome(&SkillOutcomeMsg {
+                outcome: "reached".into(),
+                observation: "{}".into(),
+            })
+            .unwrap();
         let o = host.recv_outcome().unwrap();
         assert_eq!(o.outcome, "reached");
     }

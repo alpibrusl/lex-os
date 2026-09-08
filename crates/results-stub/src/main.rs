@@ -117,7 +117,10 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
         reader.read_exact(&mut body)?;
     }
 
-    let body_preview = String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
+    let body_preview = String::from_utf8_lossy(&body)
+        .chars()
+        .take(200)
+        .collect::<String>();
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

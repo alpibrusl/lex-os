@@ -49,6 +49,11 @@ Options:
       --audit-key-file <AUDIT_KEY_FILE>
           Read the audit signing key from a file instead
 
+      --audit-sink <AUDIT_SINK>
+          Append each audit entry to this file as it happens (#88).
+          
+          `--audit-out` writes the chain once, when the run ends, so a crash takes the session's record with it — including the events that would explain the crash. This writes NDJSON as the run goes, which is also what `audit tail` follows, so an observer outside the process can watch the chain grow instead of waiting to see whether it ever arrives.
+
       --namespaces-only
           Pretend the host can only do namespace isolation
 

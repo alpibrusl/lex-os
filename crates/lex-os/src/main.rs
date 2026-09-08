@@ -183,6 +183,16 @@ enum Cmd {
         /// Read the audit signing key from a file instead.
         #[arg(long)]
         audit_key_file: Option<PathBuf>,
+        /// Append each audit entry to this file as it happens (#88).
+        ///
+        /// `--audit-out` writes the chain once, when the run ends, so a
+        /// crash takes the session's record with it — including the
+        /// events that would explain the crash. This writes NDJSON as
+        /// the run goes, which is also what `audit tail` follows, so an
+        /// observer outside the process can watch the chain grow
+        /// instead of waiting to see whether it ever arrives.
+        #[arg(long)]
+        audit_sink: Option<PathBuf>,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -452,6 +462,7 @@ fn main() {
             manifest,
             audit_out,
             audit_key,
+            audit_sink,
             audit_key_file,
             namespaces_only,
             offline,
@@ -468,6 +479,7 @@ fn main() {
             audit_out,
             audit_key,
             audit_key_file,
+            audit_sink,
             namespaces_only,
             offline,
             agent,
@@ -583,6 +595,7 @@ fn cmd_run(
     audit_out: Option<PathBuf>,
     audit_key: Option<String>,
     audit_key_file: Option<PathBuf>,
+    audit_sink: Option<PathBuf>,
     namespaces_only: bool,
     offline: bool,
     agent_backend: AgentBackend,
@@ -648,8 +661,12 @@ fn cmd_run(
             Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
         };
         let s = Supervisor::new(m, registry, p, SystemClock, Limits::default());
-        match audit_key.clone() {
+        let s = match audit_key.clone() {
             Some(k) => s.with_audit_key(k),
+            None => s,
+        };
+        match audit_sink.clone() {
+            Some(path) => s.with_audit_sink(path),
             None => s,
         }
     };
