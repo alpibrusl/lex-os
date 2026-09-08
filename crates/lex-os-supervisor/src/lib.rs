@@ -344,6 +344,10 @@ pub struct Supervisor<P: Perimeter, C: Clock> {
     /// key to does not invent one, and the log says so by carrying no
     /// seals rather than by carrying unverifiable ones.
     audit_key: Option<SigningKey>,
+    /// What authorised this session, recorded as its first entry
+    /// (lex-iac#19). `None` means nothing claims to have authorised it,
+    /// which is the honest state for a session started by hand.
+    authorisation: Option<(String, String)>,
     /// Where each entry lands as it is appended (#88). `None`
     /// keeps the old behaviour: the record exists only once the
     /// session ends, and a crash takes it with it.
@@ -365,6 +369,7 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
             clock,
             limits,
             seed_audit: None,
+            authorisation: None,
             audit_sink: None,
             audit_key: None,
         }
@@ -412,6 +417,25 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
         self
     }
 
+    /// Record which decision authorised this session (lex-iac#19).
+    ///
+    /// `domain` is the deciding chain's payload domain and `head` its
+    /// head hash. Both, because a head without its vocabulary is a hex
+    /// string that could belong to any log.
+    ///
+    /// Appended before anything else the session does, so a reader who
+    /// has only this chain can follow it back to the decision. It
+    /// establishes order — a hash cannot be quoted before the thing it
+    /// commits to exists — not that the decision's record survives.
+    pub fn with_authorisation(
+        mut self,
+        domain: impl Into<String>,
+        head: impl Into<String>,
+    ) -> Self {
+        self.authorisation = Some((domain.into(), head.into()));
+        self
+    }
+
     /// Drive an agent to a terminal [`Outcome`]. This is the one
     /// end-to-end mediation loop the whole design reduces to (design doc
     /// §10): mediated, policy-checked, logged commands under a hard
@@ -442,6 +466,13 @@ impl<P: Perimeter, C: Clock> Supervisor<P, C> {
             Some(path) => SessionAudit::new(audit).teed_to(path),
             None => SessionAudit::new(audit),
         };
+        // Before provisioning, before anything: what let this run happen.
+        if let Some((domain, head)) = self.authorisation.take() {
+            audit.append(Event::AuthorisedBy {
+                decision_head: head,
+                decision_domain: domain,
+            });
+        }
         let mut ledger = BudgetLedger::new(self.manifest.budget, self.clock.now_secs());
         let mut checkpoint = Checkpoint::default();
         let mut exec_result: Option<ExecResult> = None;
@@ -1793,6 +1824,67 @@ mod tests {
             "exec outcome must be classified in the record: {ks:?}"
         );
         report.audit.verify().unwrap();
+    }
+
+    // ── The session names its authorisation (lex-iac#19) ─────────────
+    //
+    // A gate writes its own chain and the box writes another. Without
+    // this they are related by nothing stronger than the filenames an
+    // operator chose, and a reader holding the session cannot say what
+    // let it run.
+
+    #[test]
+    fn an_authorised_session_says_so_first() {
+        let mut audit = SessionAudit::new(AuditLog::new());
+        // Stand in for what `run` does before it provisions anything.
+        audit.append(Event::AuthorisedBy {
+            decision_head: "9f2c".into(),
+            decision_domain: "lex.iac.audit.v1".into(),
+        });
+        audit.append(Event::Provisioned {
+            manifest_id: "m".into(),
+            backend: "simulated".into(),
+            reprovision: false,
+        });
+        let first = &audit.log().entries()[0].event;
+        match first {
+            Event::AuthorisedBy {
+                decision_head,
+                decision_domain,
+            } => {
+                assert_eq!(decision_head, "9f2c");
+                assert_eq!(decision_domain, "lex.iac.audit.v1");
+            }
+            other => panic!("authorisation must come before provisioning, got {other:?}"),
+        }
+    }
+
+    /// The domain is not decoration. A head is a hex string; without
+    /// knowing which vocabulary it heads, one log's head can be
+    /// presented as another's.
+    #[test]
+    fn the_authorisation_carries_its_domain() {
+        let mut audit = SessionAudit::new(AuditLog::new());
+        audit.append(Event::AuthorisedBy {
+            decision_head: "aa".into(),
+            decision_domain: "lex.iac.audit.v1".into(),
+        });
+        let json = audit.log().to_json().unwrap();
+        assert!(json.contains("lex.iac.audit.v1"), "{json}");
+        assert!(json.contains("authorised_by"), "{json}");
+    }
+
+    /// A session nobody claims to have authorised must not pretend
+    /// otherwise. Absence of a link has to read as absence.
+    #[test]
+    fn an_unauthorised_session_claims_nothing() {
+        let mut audit = SessionAudit::new(AuditLog::new());
+        audit.append(Event::Provisioned {
+            manifest_id: "m".into(),
+            backend: "simulated".into(),
+            reprovision: false,
+        });
+        assert!(!audit.log().to_json().unwrap().contains("authorised_by"));
     }
 
     // ── The record exists before the session ends (#88) ───────────────
