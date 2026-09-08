@@ -139,6 +139,37 @@ cargo run -p lex-os -- audit verify --log audit.json \
                           --trusted-key <public-hex> --checkpoint cp.json
 ```
 
+`--audit-out` writes the chain once, when the run ends. That is fine for
+a session someone is watching and wrong for the case this project is
+for: a crash loses the whole record, including the events leading up to
+whatever caused it, and nothing outside the process can see the chain
+grow while it matters.
+
+```sh
+cargo run -p lex-os -- run --simulated --audit-sink live.ndjson
+```
+
+One NDJSON line per entry, `fsync`ed as it is appended — the shape
+`audit tail` follows. A `--simulated` run writes 22 lines during the run
+that previously appeared only at the end. It is an append log, not a
+replacement for `--audit-out`: the canonical chain is still the one
+written at the end.
+
+**Naming what authorised a session.** A caller that gated this command
+wrote its own chain, and `exec` can record its head so the two records
+are one story rather than two files someone kept together:
+
+```sh
+cargo run -p lex-os -- exec --manifest grant.json \
+                          --authorised-by lex.iac.audit.v1:225964ae… -- /usr/bin/terraform …
+```
+
+That becomes the session's first entry, before it provisions anything. A
+hash cannot be quoted before the thing it commits to exists, so a
+session naming one demonstrably began after that decision — which is all
+it claims. The domain travels with the head because a bare hex string
+could head any log.
+
 | Wall | Catches | Misses |
 | --- | --- | --- |
 | the chain | an edited payload, a reordered entry, a deletion from the middle | a holder who recomputes; anything dropped from the tail |
