@@ -24,7 +24,9 @@ for tok in $(cat /proc/cmdline 2>/dev/null); do
     guest_script=*) LEX_OS_GUEST_SCRIPT="${tok#guest_script=}" ;;
   esac
 done
-: "${OLLAMA_HOST:=192.168.1.165:11434}"
+# The tap gateway: the host, seen from in here. Loopback would be this
+# guest. Overridden per-run from the kernel cmdline (ollama_host=).
+: "${OLLAMA_HOST:=169.254.42.1:11434}"
 : "${OLLAMA_MODEL:=devstral-small-2:latest}"
 export OLLAMA_HOST OLLAMA_MODEL LEX_OS_GUEST_SCRIPT
 

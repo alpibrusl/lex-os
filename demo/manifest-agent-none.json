@@ -19,5 +19,5 @@
   "grant": { "filesystem": "ReadWrite", "network": "None", "exec": "None" },
   "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 100, "max_api_calls": 50 },
   "isolation_floor": "MicroVm",
-  "egress": ["192.168.1.165:11434"]
+  "egress": ["169.254.42.1:11434"]
 }
