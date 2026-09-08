@@ -7,8 +7,26 @@ name: firecracker (KVM)
 # default GitHub-hosted infra, so it can't redden a normal PR; it is the gate
 # that must go green before the Firecracker backend can become the default
 # (lex-os#23).
+# It also runs on any *push* that touches the perimeter or the demos that
+# exercise it, so a change to the sandbox boundary gets a real boot behind
+# it without anyone remembering to dispatch this (#54).
+#
+# `push`, deliberately, and NOT `pull_request`. This repository is public
+# and this runner has passwordless sudo; a `pull_request` trigger lets
+# anyone who forks the repo execute code on it. Only people who can push to
+# this repository can start this job, which is the property that makes it
+# safe to have at all. #54 asks for a required PR check — that wording
+# predates the runner existing, and following it literally would trade a
+# gate for a remote shell. See docs/self-hosted-kvm-runner.md.
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "crates/lex-os-perimeter/**"
+      - "crates/lex-os-proto/**"
+      - "crates/lex-os-guest/**"
+      - "demo/**"
+      - ".github/workflows/firecracker.yml"
   schedule:
     - cron: "23 4 * * *"
 

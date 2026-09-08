@@ -193,6 +193,18 @@ other two are refused.
 | musl build warning in setup-assets | `rustup target add "$(uname -m)-unknown-linux-musl"`. Not needed for `wall2`, but the agent demos inject the guest binary. |
 | Runner offline for the nightly cron | Install it as a service (Step 3), not just `./run.sh`. |
 
+## What runs it automatically, and what must not
+
+The job runs on `workflow_dispatch`, on the nightly cron, and on any
+**push** touching `crates/lex-os-perimeter/`, `lex-os-proto`,
+`lex-os-guest`, `demo/`, or the workflow itself. A change to the sandbox
+boundary therefore gets a real boot behind it without anyone remembering
+to dispatch this (#54).
+
+`push` is safe here for one specific reason: only people who can push to
+this repository can start it. That is the whole property, and the next
+section is about the trigger that would destroy it.
+
 ## Do not add a `pull_request` trigger
 
 Said in the box at the top and worth repeating at the bottom, because it
