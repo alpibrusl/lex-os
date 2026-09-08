@@ -68,6 +68,31 @@ pub const GENESIS: &str = "00000000000000000000000000000000000000000000000000000
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
+    /// What authorised this session, as a decision recorded elsewhere.
+    ///
+    /// First in a session that has one, so a reader holding only the
+    /// session can say which decision it descends from. A gate writes
+    /// its own chain and the box writes another; without this the two
+    /// are related by nothing stronger than the filenames an operator
+    /// chose (lex-iac#19).
+    ///
+    /// Knowing the head is itself the evidence of order: a hash cannot
+    /// be quoted before the thing it commits to exists, so a session
+    /// naming one demonstrably began after that decision was made. It
+    /// does not prove the decision's record still exists — that is what
+    /// a ledger is for — nor that this was the only session it
+    /// authorised.
+    AuthorisedBy {
+        /// The head hash of the deciding chain.
+        decision_head: String,
+        /// That chain's payload domain, e.g. `lex.iac.audit.v1`.
+        ///
+        /// Recorded because a head is meaningless without knowing what
+        /// kind of log it is the head of, and because it stops a head
+        /// from one vocabulary being presented as another — the same
+        /// reason `Checkpoint` carries one.
+        decision_domain: String,
+    },
     /// A box was provisioned (or reprovisioned) from a manifest.
     Provisioned {
         manifest_id: String,

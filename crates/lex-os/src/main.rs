@@ -266,6 +266,17 @@ enum Cmd {
         /// Write the resulting audit log here.
         #[arg(long)]
         audit_out: Option<PathBuf>,
+        /// Record which decision authorised this run, as `<domain>:<head>`
+        /// (lex-iac#19).
+        ///
+        /// A caller that gated this command wrote its own chain; this
+        /// puts that chain's head in the session's first entry, so the
+        /// two records can be shown to be one story rather than two
+        /// files an operator happened to keep together.
+        ///
+        /// e.g. `--authorised-by lex.iac.audit.v1:9f2c…`
+        #[arg(long, value_name = "DOMAIN:HEAD")]
+        authorised_by: Option<String>,
         /// Pretend the host can only do namespace isolation.
         #[arg(long)]
         namespaces_only: bool,
@@ -501,6 +512,7 @@ fn main() {
         Cmd::Exec {
             manifest,
             audit_out,
+            authorised_by,
             namespaces_only,
             offline,
             stdin_file,
@@ -514,6 +526,7 @@ fn main() {
             &fmt,
             manifest,
             audit_out,
+            authorised_by,
             namespaces_only,
             offline,
             stdin_file,
@@ -1124,6 +1137,7 @@ fn run_exec_in_vm(
     env: &lex_os_resolver::Environment,
     jail: Option<lex_os_perimeter::JailConfig>,
     image: &GuestImage,
+    authorisation: Option<(String, String)>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
     use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter, GUEST_CONSOLE};
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
@@ -1156,6 +1170,10 @@ fn run_exec_in_vm(
         SystemClock,
         limits,
     );
+    let supervisor = match &authorisation {
+        Some((domain, head)) => supervisor.with_authorisation(domain, head),
+        None => supervisor,
+    };
     let transport = LazyVsockTransport::new(vsock_base);
     let mut agent = VsockAgent::new(transport, manifest);
     supervisor.run(env, &mut agent).map_err(Into::into)
@@ -1168,6 +1186,7 @@ fn run_exec_subprocess(
     manifest: Manifest,
     env: &lex_os_resolver::Environment,
     guest_bin: Option<PathBuf>,
+    authorisation: Option<(String, String)>,
 ) -> anyhow::Result<lex_os_supervisor::SessionReport> {
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
     use std::io::BufReader;
@@ -1209,6 +1228,10 @@ fn run_exec_subprocess(
         SystemClock,
         limits,
     );
+    let supervisor = match &authorisation {
+        Some((domain, head)) => supervisor.with_authorisation(domain, head),
+        None => supervisor,
+    };
     let mut agent = VsockAgent::new(transport, manifest);
     let report = supervisor.run(env, &mut agent)?;
 
@@ -1752,10 +1775,34 @@ impl GuestImage {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `<domain>:<head>` — the deciding chain's vocabulary and its head.
+///
+/// Split on the *last* colon: a domain is dotted and a head is hex, but
+/// only one of them can contain a colon in any future spelling, and
+/// guessing wrong turns a link into a lie.
+fn parse_authorisation(raw: &str) -> Result<(String, String), String> {
+    let (domain, head) = raw.rsplit_once(':').ok_or_else(|| {
+        format!("--authorised-by wants `<domain>:<head>`, got `{raw}` with no colon")
+    })?;
+    if domain.is_empty() {
+        return Err(
+            "--authorised-by has an empty domain; a head is meaningless without one".into(),
+        );
+    }
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "--authorised-by head `{head}` is not hex; that is a chain head, not a name"
+        ));
+    }
+    Ok((domain.to_string(), head.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_exec(
     fmt: &OutputFormat,
     manifest_path: PathBuf,
     audit_out: Option<PathBuf>,
+    authorised_by: Option<String>,
     namespaces_only: bool,
     offline: bool,
     stdin_file: Option<PathBuf>,
@@ -1767,6 +1814,16 @@ fn cmd_exec(
 ) -> ExitCode {
     let _ = &jail; // consumed only by the firecracker path below
     let start = Instant::now();
+
+    // Validated here rather than deep in the run: a malformed
+    // authorisation should cost nothing, and a caller that meant to link
+    // its decision to this session must not find out afterwards that the
+    // link was silently dropped.
+    let authorisation = match authorised_by.as_deref().map(parse_authorisation) {
+        None => None,
+        Some(Ok(pair)) => Some(pair),
+        Some(Err(e)) => return emit_err(fmt, "exec", ExitCode::InvalidArgs, &e),
+    };
 
     if let Err(e) = image.check() {
         return emit_err(fmt, "exec", ExitCode::NotFound, &e);
@@ -1826,9 +1883,17 @@ fn cmd_exec(
 
     let env = environment(namespaces_only, offline);
     let report = match backend {
-        Backend::Simulated => run_exec_subprocess(exec_manifest, &env, guest_bin),
+        Backend::Simulated => {
+            run_exec_subprocess(exec_manifest, &env, guest_bin, authorisation.clone())
+        }
         #[cfg(feature = "firecracker")]
-        Backend::Real => run_exec_in_vm(exec_manifest, &env, jail.to_config(), &image),
+        Backend::Real => run_exec_in_vm(
+            exec_manifest,
+            &env,
+            jail.to_config(),
+            &image,
+            authorisation.clone(),
+        ),
         #[cfg(not(feature = "firecracker"))]
         Backend::Real => unreachable!("select_backend rejects Real without firecracker"),
     };
@@ -2036,4 +2101,57 @@ fn emit_err(fmt: &OutputFormat, command: &str, code: ExitCode, message: &str) ->
         fmt,
     );
     code
+}
+
+#[cfg(test)]
+mod authorisation_tests {
+    use super::parse_authorisation;
+
+    #[test]
+    fn a_domain_and_a_head() {
+        let (d, h) = parse_authorisation("lex.iac.audit.v1:9f2c8ab").unwrap();
+        assert_eq!(d, "lex.iac.audit.v1");
+        assert_eq!(h, "9f2c8ab");
+    }
+
+    /// Split on the last colon. A domain could grow one; a hex head
+    /// cannot, so the rightmost colon is the only unambiguous divider.
+    #[test]
+    fn the_last_colon_divides() {
+        let (d, h) = parse_authorisation("urn:lex:iac:aa11").unwrap();
+        assert_eq!(d, "urn:lex:iac");
+        assert_eq!(h, "aa11");
+    }
+
+    /// Refused, never silently dropped. A caller that meant to link its
+    /// decision to this session must not learn afterwards that the link
+    /// was not made.
+    #[test]
+    fn malformed_input_is_refused() {
+        for bad in [
+            "nocolon",
+            ":aa11",
+            "domain:",
+            "lex.iac:zzzz",
+            "lex.iac:9f 2c",
+        ] {
+            assert!(
+                parse_authorisation(bad).is_err(),
+                "`{bad}` should not parse into a link"
+            );
+        }
+    }
+
+    #[test]
+    fn the_error_says_which_half_is_wrong() {
+        assert!(parse_authorisation("lex.iac:zzz")
+            .unwrap_err()
+            .contains("not hex"));
+        assert!(parse_authorisation(":aa")
+            .unwrap_err()
+            .contains("empty domain"));
+        assert!(parse_authorisation("nocolon")
+            .unwrap_err()
+            .contains("no colon"));
+    }
 }
