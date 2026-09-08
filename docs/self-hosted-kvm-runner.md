@@ -70,10 +70,41 @@ The runner's OS user does **not** need to be in the `kvm` group: the demos run
 firecracker under the jailer via `sudo`, and the jailer sets up `/dev/kvm` inside
 the chroot with the `kvm` gid.
 
+## 0. Use a dedicated account, not your own
+
+Everything below says `RUNUSER`. Make that a **service account whose home is
+not under `/home/<a person's name>`** — say `ghrunner`, with `/opt/ghrunner`.
+
+This is not tidiness. The runner writes its working directory into the log of
+every job, some fifty lines a run, and on a public repository those logs are
+public:
+
+```
+Working directory is '/home/RUNUSER/actions-runner/_work/lex-os/lex-os'
+```
+
+That was true of this project's own runner for its first eight runs, because
+this runbook said `RUNUSER` and meant "you". No workflow file can suppress it
+— the runner emits it during `Set up job`, before any step of ours runs — so
+the account name is the only place to fix it.
+
+The runner also prints `Machine name: '<hostname>'` from the host's hostname.
+If that name is one you would rather not publish, give the *service* a private
+one instead of renaming the machine (systemd ≥ 258):
+
+```sh
+sudo systemctl edit actions.runner.<owner>-<repo>.<name>.service
+# [Service]
+# ProtectHostname=yes:kvm-runner
+```
+
+That is a private UTS namespace for the unit alone. Deleting the drop-in
+reverts it.
+
 ## 1. Passwordless sudo (required)
 
 CI is non-interactive and the job calls `sudo`. Grant the **runner's** user
-passwordless sudo (replace `RUNUSER` with the account that will run the runner):
+passwordless sudo (replace `RUNUSER` with the account from step 0):
 
 ```sh
 echo "RUNUSER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/lexos-kvm-runner
@@ -94,7 +125,7 @@ gh api -X POST repos/alpibrusl/lex-os/actions/runners/registration-token \
   --jq .token
 ```
 
-Then, as `RUNUSER`, in a dedicated directory:
+Then, as `RUNUSER` (the service account from step 0), in a dedicated directory:
 
 ```sh
 mkdir -p ~/actions-runner && cd ~/actions-runner
@@ -117,6 +148,25 @@ with `Runner name: '<name>'`. `--name "$(hostname)-kvm"` — which this
 runbook used to suggest — therefore publishes the hostname of a machine
 somebody owns, next to a document explaining that it has passwordless
 sudo. `kvm-1` says everything the workflow needs to know.
+
+### Cleaning up logs that already leaked
+
+Deleting a run's logs keeps the run itself — the green tick and its timing
+stay, which matters when those runs are the evidence the perimeter works:
+
+```sh
+gh api -X DELETE repos/alpibrusl/lex-os/actions/runs/<id>/logs
+```
+
+**Verify against the API, not against `gh run view --log`.** `gh` caches
+downloaded logs under `~/.cache/gh`, and a cached copy reads back
+identically after the server has already dropped it — which looks exactly
+like a deletion that silently failed. `rm -rf ~/.cache/gh` first, or ask
+the endpoint directly and expect a 404:
+
+```sh
+gh api repos/alpibrusl/lex-os/actions/runs/<id>/logs -i --silent | head -1
+```
 
 The same logs carry the runner's working directory, so the account name
 appears in every path. If that matters to you, run the runner as a
