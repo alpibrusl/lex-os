@@ -27,3 +27,17 @@ jobs:
         # Boots a real Firecracker microVM and asserts traffic to 8.8.8.8 is
         # dropped at the host tap while the one allowlisted host is reachable.
         run: sudo bash demo/wall2.sh
+
+      - name: vsock re-attach across a reprovision (#27 task 2)
+        # The other thing only a KVM host can prove, and until now the only
+        # one nothing ran. `demo/reprovision.sh` boots a real microVM, has
+        # the in-guest agent dispose its own box mid-task, and asserts the
+        # supervisor rebuilt it, re-`accept()`ed the fresh guest over vsock,
+        # and that real work ran *after* the rebuild — not merely that the
+        # session ended without erroring.
+        #
+        # Without `Transport::reconnect` this fails rather than hangs: the
+        # supervisor keeps the dead guest's stream and the agent gives up.
+        # That is worth gating, because the failure is silent in exactly the
+        # case the box is for — an unattended run whose sandbox died.
+        run: sudo bash demo/reprovision.sh
