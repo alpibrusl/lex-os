@@ -4,7 +4,7 @@
 # host supervisor mediates every action over vsock. Needs a KVM host + root.
 #
 #   sudo bash demo/agent.sh
-#   sudo OLLAMA=192.168.1.165:11434 MODEL=qwen3-coder:30b bash demo/agent.sh
+#   sudo OLLAMA=169.254.42.1:11434 MODEL=qwen3-coder:30b bash demo/agent.sh
 #
 # NOTE: until the guest-NAT piece lands, the agent cannot actually reach Ollama
 # from inside the VM — this run proves the vsock channel (guest boots → connects
@@ -15,7 +15,10 @@ set -euo pipefail
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
 
-OLLAMA="${OLLAMA:-192.168.1.165:11434}"
+# The tap gateway — the guest dials this to reach the host running
+# Ollama. Ollama binds loopback by default, so the host needs
+# OLLAMA_HOST=0.0.0.0 for the box to reach it.
+OLLAMA="${OLLAMA:-169.254.42.1:11434}"
 MODEL="${MODEL:-devstral-small-2:latest}"
 # Manifest: first positional arg (survives sudo, unlike env), else $MANIFEST, else default.
 # demo/manifest-agent.json: net=allowlist (agent may call the net).

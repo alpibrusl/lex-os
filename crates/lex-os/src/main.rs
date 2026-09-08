@@ -936,9 +936,20 @@ fn run_guest_in_vm(
     use lex_os_perimeter::{FirecrackerAssets, FirecrackerPerimeter, GUEST_CONSOLE};
     use lex_os_supervisor::{Limits, Supervisor, SystemClock, VsockAgent};
 
+    // The tap gateway — "the host that booted this box", from inside it.
+    //
+    // NOT 127.0.0.1: this string is read by the guest, where loopback is
+    // the guest itself and nothing is listening. And not a LAN address,
+    // which is what used to be here — one contributor's, in a public
+    // repository, wrong for every other reader and silently so.
+    //
+    // `169.254.42.1` is the same address `results.demo.internal` resolves
+    // to in demo/init-attack.sh, so the demos agree about how a guest
+    // reaches its host. Ollama must be listening on it: it binds loopback
+    // by default, so serving a box needs OLLAMA_HOST=0.0.0.0 on the host.
     let ollama_host = ollama_url
         .as_deref()
-        .unwrap_or("192.168.1.165:11434")
+        .unwrap_or("169.254.42.1:11434")
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .to_string();

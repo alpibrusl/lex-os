@@ -4,7 +4,7 @@
     "runs inside the microVM and reasons via a local Ollama model. The model is",
     "the agent's brain, so the box's ONE allowed egress target is the Ollama",
     "host — everything else is dropped at the host tap. The egress entry must",
-    "match the --ollama-url passed to `lex-os run` (default 192.168.1.165:11434).",
+    "match the --ollama-url passed to `lex-os run` (default 169.254.42.1:11434).",
     "Network is Allowlist (not Full): the agent can reach the model and nothing",
     "else; exec stays None; filesystem is ReadWrite for its report work."
   ],
@@ -15,5 +15,5 @@
   "grant": { "filesystem": "ReadWrite", "network": "Allowlist", "exec": "None" },
   "budget": { "wall_clock_secs": 600, "max_commands": 200, "max_money_cents": 100, "max_api_calls": 50 },
   "isolation_floor": "MicroVm",
-  "egress": ["192.168.1.165:11434"]
+  "egress": ["169.254.42.1:11434"]
 }
