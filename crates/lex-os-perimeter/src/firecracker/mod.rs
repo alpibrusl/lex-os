@@ -24,6 +24,49 @@ use lex_os_manifest::{Dimension, IsolationFloor, Level};
 
 /// Paths the perimeter needs to find at runtime. Override per-instance for
 /// tests; the defaults match what `demo/setup-assets.sh` produces.
+/// Box size from `LEX_OS_VM_VCPUS` / `LEX_OS_VM_MEM_MIB`, Firecracker's own
+/// defaults (1 vCPU, 128 MiB) when unset or unparsable, clamped to what a
+/// microVM can take (1..=32 vCPUs, 128..=65536 MiB).
+pub fn vm_size_from_env() -> (u32, u32) {
+    vm_size_from(
+        std::env::var("LEX_OS_VM_VCPUS").ok().as_deref(),
+        std::env::var("LEX_OS_VM_MEM_MIB").ok().as_deref(),
+    )
+}
+
+/// The pure half of [`vm_size_from_env`], so the parsing and clamping are
+/// testable without touching the process environment.
+pub fn vm_size_from(vcpus: Option<&str>, mem_mib: Option<&str>) -> (u32, u32) {
+    fn read(raw: Option<&str>, default: u32, lo: u32, hi: u32) -> u32 {
+        raw.and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|n| n.clamp(lo, hi))
+            .unwrap_or(default)
+    }
+    (read(vcpus, 1, 1, 32), read(mem_mib, 128, 128, 65536))
+}
+
+#[cfg(test)]
+mod vm_size_tests {
+    use super::vm_size_from;
+
+    #[test]
+    fn unset_keeps_firecracker_defaults() {
+        assert_eq!(vm_size_from(None, None), (1, 128));
+    }
+
+    #[test]
+    fn set_values_are_used_and_clamped() {
+        assert_eq!(vm_size_from(Some("2"), Some("2048")), (2, 2048));
+        assert_eq!(vm_size_from(Some(" 4 "), Some("64")), (4, 128));
+        assert_eq!(vm_size_from(Some("999"), Some("999999")), (32, 65536));
+    }
+
+    #[test]
+    fn garbage_falls_back_to_defaults() {
+        assert_eq!(vm_size_from(Some("two"), Some("")), (1, 128));
+    }
+}
+
 pub struct FirecrackerAssets {
     pub kernel: PathBuf,
     pub rootfs: PathBuf,
@@ -318,6 +361,18 @@ impl FirecrackerPerimeter {
         if let (Some(root), Some(cfg)) = (&lay.jail_root, &self.assets.jail) {
             stage_jail_assets(root, &self.assets, cfg.uid, cfg.gid)?;
         }
+
+        // 3c. Machine size. Firecracker's own defaults (1 vCPU, 128 MiB) fit
+        //     the demo probes and a curl; a real workload inside the box (a
+        //     lex program driving a model, lex-loom#415 step 3) does not boot
+        //     in 128 MiB. Env-configurable until the manifest carries it;
+        //     unset keeps Firecracker's defaults exactly.
+        let (vcpus, mem_mib) = vm_size_from_env();
+        let machine = format!(r#"{{"vcpu_count":{vcpus},"mem_size_mib":{mem_mib}}}"#);
+        with_socket(&lay.api_sock_host, |s| {
+            put_json(s, "/machine-config", &machine)
+        })
+        .map_err(perimeter_err)?;
 
         // 4. Boot source.
         let boot = format!(
