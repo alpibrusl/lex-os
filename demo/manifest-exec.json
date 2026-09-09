@@ -1,5 +1,5 @@
 {
-  "_comment_exec_manifest": [
+  "_comment": [
     "Manifest for the REAL in-VM `exec` demo. `exec` overwrites `goal` with the",
     "actual command spec before dispatch, so the text here is never read — only",
     "grant/budget/isolation_floor matter. exec: Sandboxed is what lets the",

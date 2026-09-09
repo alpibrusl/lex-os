@@ -1,5 +1,5 @@
 {
-  "_comment_net_none_variant": [
+  "_comment": [
     "Variant of manifest-agent.json that grants the agent NO network capability",
     "(network: None) so its net.fetch command is DENIED at mediation — letting",
     "the full demo show all the walls firing against a live agent: fs allowed,",

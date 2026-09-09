@@ -1,5 +1,5 @@
 {
-  "_comment_reprovision_manifest": [
+  "_comment": [
     "Manifest for the vsock re-attach demo (issue #27, Task 2). The in-VM agent",
     "runs a deterministic, model-free script (LEX_OS_GUEST_SCRIPT=reprovision-demo):",
     "read a file, deliberately dispose the box mid-task, then — on the rebuilt box",

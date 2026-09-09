@@ -40,6 +40,27 @@ Two boundaries, kept strictly separate:
   the kernel/VM level. Everything it enforces derives from one
   declaration: the trust grant.
 
+### Writing that declaration
+
+The manifest is the whole safety boundary, so it is worth being able to write
+one without reconstructing the format from prose:
+
+| | |
+| --- | --- |
+| **The schema** | [`schema/manifest.schema.json`](schema/manifest.schema.json) — every field, every level, what each one counts |
+| **Worked examples** | [`demo/*.json`](demo), starting with [`demo/manifest.json`](demo/manifest.json) |
+
+Both exist because two independent authors were asked to write a manifest
+from this README alone and neither arrived at the schema — they invented two
+different ones ([#89](https://github.com/alpibrusl/lex-os/issues/89)). An
+unknown field is now **refused rather than ignored**
+([#101](https://github.com/alpibrusl/lex-os/issues/101)): a budget naming
+`max_cpu_millicores` used to parse and produce no CPU ceiling at all, which
+is the shape of mistake that fails open and stays invisible.
+
+`_comment` is the one reserved key, since JSON has no comment syntax and it
+never reaches the content address.
+
 ## Architecture
 
 ```
