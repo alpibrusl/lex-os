@@ -984,12 +984,19 @@ mod exec_pipe_tests {
     #[test]
     fn large_output_does_not_deadlock() {
         let spec = ExecSpec {
-            argv: vec!["/bin/sh".into(), "-c".into(), "head -c 1048576 /dev/zero | tr '\\0' 'x'".into()],
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "head -c 1048576 /dev/zero | tr '\\0' 'x'".into(),
+            ],
             stdin: None,
             wall_clock_secs: 20,
         };
         let r = execute_locally(&spec);
-        assert!(!r.timed_out, "timed out: the pipes were not drained while the child ran");
+        assert!(
+            !r.timed_out,
+            "timed out: the pipes were not drained while the child ran"
+        );
         assert_eq!(r.exit_code, Some(0));
         assert_eq!(r.stdout.len(), 1048576);
     }
