@@ -1,5 +1,5 @@
 {
-  "_comment_agent_manifest": [
+  "_comment": [
     "Manifest for the REAL in-VM agent run (issue #16). The agent (lex-os-guest)",
     "runs inside the microVM and reasons via a local Ollama model. The model is",
     "the agent's brain, so the box's ONE allowed egress target is the Ollama",

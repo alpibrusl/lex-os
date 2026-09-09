@@ -1,5 +1,5 @@
 {
-  "_comment_attack_3": [
+  "_comment": [
     "Attack #3 — narrowing wall (issue #14 'Attempt 3').",
     "",
     "The parent manifest (demo/manifest.json) restricts network to",

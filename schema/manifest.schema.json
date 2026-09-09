@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alpibrusl/lex-os/schema/manifest.schema.json",
+  "title": "lex-os trust manifest",
+  "description": "The owner's complete safety declaration. Once an agent is dispatched no human watches, so this document IS the safety boundary — everything the runtime enforces is derived from it. Written by whoever holds the authority being granted; read by the Lex type checker, the supervisor, and every downstream gate. Worked examples: demo/*.json, starting with demo/manifest.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["goal", "grant", "budget", "isolation_floor"],
+  "properties": {
+    "goal": { "$ref": "#/$defs/Goal" },
+    "grant": { "$ref": "#/$defs/Grant" },
+    "budget": { "$ref": "#/$defs/Budget" },
+    "isolation_floor": { "$ref": "#/$defs/IsolationFloor" },
+    "egress": {
+      "description": "The only hosts the box may reach, as `host` or `host:port`. A leading `*.` matches subdomains. An EMPTY list grants no egress — it does not mean unrestricted. Both the static type check and the kernel firewall are derived from this list, so it is the allowlist in the literal sense.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "actuation": {
+      "description": "The robot half of the grant. Omit or null for an ordinary agent box; when present the supervisor mediates every skill's arguments against it.",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Actuation" }],
+      "default": null
+    },
+    "facets": {
+      "description": "Authority domains lex-os does not itself model, keyed by facet name — `infra` for a Terraform plan, `pod` for an admission wall. Deliberately type-erased here: the consuming gate supplies a registry that narrows them. An UNREGISTERED facet must be byte-identical between parent and child, which is safe rather than permissive.",
+      "type": "object",
+      "additionalProperties": true,
+      "default": {}
+    },
+    "_comment": {
+      "description": "Free-text notes; the one reserved key, because JSON has no comment syntax and these manifests carry real reasoning. Ignored by every decision and excluded from the content address, so annotating a manifest never re-identifies it. Note it is exactly `_comment`, not a prefix: `_comment_foo` is refused like any other unknown field."
+    }
+  },
+  "$defs": {
+    "Goal": {
+      "description": "What the agent is asked to accomplish. An object, not a string.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description"],
+      "properties": {
+        "description": { "type": "string" },
+        "done_signal": {
+          "description": "A token the agent reports to claim completion. The supervisor treats reaching it as ONE terminal condition, never the only one — budget exhaustion and kill always win.",
+          "type": ["string", "null"],
+          "default": null
+        }
+      }
+    },
+    "Grant": {
+      "description": "The capability grant: the same declaration the Lex type checker uses to reject a program calling an un-granted effect, and the one the supervisor turns into an OS sandbox policy. One declaration, two enforcement layers.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesystem", "network", "exec"],
+      "properties": {
+        "filesystem": { "$ref": "#/$defs/Level" },
+        "network": { "$ref": "#/$defs/Level" },
+        "exec": { "$ref": "#/$defs/Level" }
+      }
+    },
+    "Level": {
+      "description": "One authority level. NOTE: all three axes share this single enum, so a level whose name belongs to another axis is accepted today even though it means nothing there — `exec: \"Allowlist\"` parses and outranks `Sandboxed`. That is a known defect (alpibrusl/lex-lang#808), not a feature to use. Per axis, the levels that are meaningful are: filesystem — None, ReadOnly, ReadWrite, Full; network — None, Loopback, Allowlist, Full; exec — None, Sandboxed, Full. Ordering is by rank: None=0; ReadOnly, Sandboxed, Loopback=1; ReadWrite, Allowlist=2; Full=3. A child manifest may only narrow, and narrowing compares rank.",
+      "type": "string",
+      "enum": ["None", "ReadOnly", "Sandboxed", "Loopback", "ReadWrite", "Allowlist", "Full"]
+    },
+    "Budget": {
+      "description": "Hard, externally-enforced bounds. External because a stuck or misaligned agent will not honour its own limits; on exhaustion the box halts regardless of goal state. These four fields are the whole budget — there is no CPU or memory ceiling here, and inventing one is refused rather than ignored.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wall_clock_secs", "max_commands", "max_money_cents", "max_api_calls"],
+      "properties": {
+        "wall_clock_secs": {
+          "description": "Wall-clock ceiling in seconds. Job-shaped: a long-running service has no natural value here (lex-os#89).",
+          "type": "integer", "minimum": 0
+        },
+        "max_commands": {
+          "description": "Maximum MEDIATED commands the agent may issue — supervisor-mediated effects, not inbound requests.",
+          "type": "integer", "minimum": 0
+        },
+        "max_money_cents": {
+          "description": "Maximum spend, in integer cents. Never a float: budgets must be exact. Consumers read this differently — forecast spend for a Terraform plan, committed reservation for a Kubernetes namespace.",
+          "type": "integer", "minimum": 0
+        },
+        "max_api_calls": {
+          "description": "Maximum external API calls — a sub-budget of network egress, so outbound only.",
+          "type": "integer", "minimum": 0
+        }
+      }
+    },
+    "IsolationFloor": {
+      "description": "The MINIMUM isolation strength the owner requires. The resolver maps this plus the grant to a backend and REFUSES rather than downgrades if the environment cannot reach the floor. A grant also implies a floor on its own: exec None implies Namespace, exec Full implies MicroVm, anything between implies Gvisor — the owner may raise it, never lower it.",
+      "type": "string",
+      "enum": ["Namespace", "Gvisor", "MicroVm"]
+    },
+    "Actuation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skills", "arms", "grippers"],
+      "properties": {
+        "skills": { "type": "array", "items": { "type": "string" } },
+        "arms": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ActuatorArm" } },
+        "grippers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ActuatorGripper" } },
+        "bases": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ActuatorBase" }, "default": {} }
+      }
+    },
+    "ActuatorArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_m", "max_velocity_mps", "max_force_n"],
+      "properties": {
+        "workspace_m": { "type": "array", "items": { "$ref": "#/$defs/Range" }, "minItems": 3, "maxItems": 3 },
+        "max_velocity_mps": { "type": "number" },
+        "max_force_n": { "type": "number" }
+      }
+    },
+    "ActuatorGripper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_grip_force_n"],
+      "properties": { "max_grip_force_n": { "type": "number" } }
+    },
+    "ActuatorBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["floor_area_m", "max_speed_mps"],
+      "properties": {
+        "floor_area_m": { "type": "array", "items": { "$ref": "#/$defs/Range" }, "minItems": 2, "maxItems": 2 },
+        "max_speed_mps": { "type": "number" }
+      }
+    },
+    "Range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": { "min": { "type": "number" }, "max": { "type": "number" } }
+    }
+  }
+}

@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 /// machine-checkable done-signal the agent emits when it believes the
 /// goal is met (the supervisor still owns the decision to stop).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Goal {
     pub description: String,
     /// A token the agent reports to claim completion. The supervisor
@@ -86,6 +87,7 @@ impl Reversibility {
 ///
 /// Money is integer cents to keep budgets exact (no float drift).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Budget {
     /// Wall-clock ceiling in seconds.
     pub wall_clock_secs: u64,
@@ -153,6 +155,7 @@ impl IsolationFloor {
 /// Content-addressable so the supervisor can hold it in tamper-proof
 /// external storage and reprovision an identical box from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub goal: Goal,
     pub grant: Grant,
@@ -186,6 +189,17 @@ pub struct Manifest {
     /// unchanged.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub facets: BTreeMap<String, serde_json::Value>,
+    /// Free-text notes. JSON has no comment syntax and these manifests
+    /// carry real reasoning, so one reserved key holds it.
+    ///
+    /// It exists because this struct now refuses unknown fields, and a
+    /// manifest that could no longer explain itself would be the wrong
+    /// thing to win from that. Never read by any decision, and
+    /// deliberately absent from [`Manifest::canonical_json`] — a note
+    /// cannot change a `ManifestId`, so annotating a manifest never
+    /// re-identifies it.
+    #[serde(default, rename = "_comment", skip_serializing_if = "Option::is_none")]
+    pub comment: Option<serde_json::Value>,
 }
 
 /// Content address of a [`Manifest`].
@@ -244,6 +258,7 @@ impl Manifest {
             egress: Vec::new(),
             actuation: None,
             facets: BTreeMap::new(),
+            comment: None,
         }
     }
 
@@ -427,6 +442,11 @@ impl Manifest {
             // always a valid narrowing. A child that wants a tighter
             // facet sets it explicitly and goes through the wall.
             facets: self.facets.clone(),
+            // NOT inherited: a note explaining the parent is not a note
+            // explaining the child, and a stale one would be worse than
+            // none. It also cannot affect the child's identity either
+            // way, since canonical_json ignores it.
+            comment: None,
         })
     }
 
@@ -1021,6 +1041,7 @@ mod tests {
 /// One-shot escalation: a grant delta bound to a single command, authorized
 /// by a named resolver.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EscalationGrant {
     /// The exact registered command name this delta applies to.
     pub command: String,

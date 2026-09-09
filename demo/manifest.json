@@ -1,5 +1,5 @@
 {
-  "_comment_demo_manifest": [
+  "_comment": [
     "Canonical manifest for the lex-os one-continuous-run demo (issue #10).",
     "",
     "Identical to examples/net-allowlisted.json on grant + egress + isolation",

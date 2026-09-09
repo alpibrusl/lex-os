@@ -1,5 +1,5 @@
 {
-  "_comment_egress_manifest": [
+  "_comment": [
     "Manifest for the egress ALLOWED-leg + host-local fencing demo (issue #27,",
     "Task 4). The one allowed target is the tap gateway 169.254.42.1:443 — the",
     "host as the guest sees it across the tap, where demo/egress.sh runs a",
