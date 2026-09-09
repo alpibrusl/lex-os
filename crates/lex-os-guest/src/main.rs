@@ -293,36 +293,53 @@ fn execute_locally(spec: &ExecSpec) -> LocalExecResult {
         }
     }
 
+    // Drain stdout/stderr WHILE the child runs. Reading them only after
+    // exit (wait_with_output) deadlocks any command that writes more than
+    // the pipe buffer (~64 KiB): the child blocks on write, never exits,
+    // and the box sits until the wall clock. Found live running a whole
+    // lex-loom company inside a box (lex-loom#415 step 3).
+    let out_pipe = child.stdout.take();
+    let err_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(mut p) = out_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(mut p) = err_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
     let deadline = Instant::now() + Duration::from_secs(spec.wall_clock_secs.max(1));
     let mut timed_out = false;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(st)) => break Some(st),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     timed_out = true;
-                    break;
+                    break child.wait().ok();
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(_) => break,
+            Err(_) => break None,
         }
-    }
-
-    match child.wait_with_output() {
-        Ok(output) => LocalExecResult {
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            timed_out,
-        },
-        Err(e) => LocalExecResult {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: format!("wait failed: {e}"),
-            timed_out,
-        },
+    };
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    LocalExecResult {
+        exit_code: status.and_then(|st| st.code()),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        timed_out,
     }
 }
 
@@ -955,5 +972,25 @@ mod tests {
         );
         assert_eq!(parse_outcome("not json"), "reached");
         assert_eq!(parse_outcome(r#"{"status":"ok"}"#), "reached");
+    }
+}
+
+#[cfg(test)]
+mod exec_pipe_tests {
+    use super::*;
+
+    /// A command whose output exceeds the pipe buffer must finish, not hang
+    /// until the wall clock: 1 MiB through `head -c` on any POSIX guest.
+    #[test]
+    fn large_output_does_not_deadlock() {
+        let spec = ExecSpec {
+            argv: vec!["/bin/sh".into(), "-c".into(), "head -c 1048576 /dev/zero | tr '\\0' 'x'".into()],
+            stdin: None,
+            wall_clock_secs: 20,
+        };
+        let r = execute_locally(&spec);
+        assert!(!r.timed_out, "timed out: the pipes were not drained while the child ran");
+        assert_eq!(r.exit_code, Some(0));
+        assert_eq!(r.stdout.len(), 1048576);
     }
 }
