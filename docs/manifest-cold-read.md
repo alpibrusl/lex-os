@@ -53,26 +53,32 @@ end of this.
 All three are public, so you can read them without asking anyone for access.
 What matters is that you didn't write it.
 
-| Service | Why it's interesting |
-| --- | --- |
-| `lex-attest` | Signing sidecar. Holds keys and publishes to caller-supplied destinations, so the isolation floor and the egress allowlist are both real decisions. |
-| `lex-oms` | HTTP order management server. Talks to several other services, so the egress allowlist is a real decision. |
-| `lex-guard` | Spending guardrails. Budget-shaped by nature, which puts pressure on the budget fields. |
+| Service | Fixture | Why it's interesting |
+| --- | --- | --- |
+| `lex-attest` | [fixture](cold-read-fixtures/lex-attest.md) | Signing sidecar. Holds keys and publishes to caller-supplied destinations, so the isolation floor and the egress allowlist are both real decisions. |
+| `lex-oms` | [fixture](cold-read-fixtures/lex-oms.md) | HTTP order management server. Talks to several other services, so the egress allowlist is a real decision. |
+| `lex-guard` | [fixture](cold-read-fixtures/lex-guard.md) | Spending guardrails. Its own purpose is bounding spend, so its budget and the manifest's meet. |
 
-### None of them ships a deployment spec, and that's expected
+### Read the fixture — the deployment context is given
 
-You will not find an image digest, a Secret name, a NetworkPolicy, a
-ServiceAccount or a parent manifest in any of these repositories. The
-manifest needs all of them.
+Each fixture supplies what the application repository does not: the image
+digest, the namespace, the Secret and ServiceAccount names, the storage, the
+NetworkPolicy the cluster already enforces, and the parent manifest you must
+narrow.
 
-**Invent what you need, and log each invention.** Writing
-`registry.example/thing@sha256:...` because nothing told you the real one is a
-finding, not a failure — and it's a more useful finding than anything you'll
-hit inside the gate. Note where the information *should* have come from.
+They exist because the first two passes both stopped before reaching a gate,
+having had to invent all of that first — *"the most concrete-looking field in
+the YAML is actually fiction."* You should be challenged by **the grant**, not
+by guessing what infrastructure the service would have had.
 
-A previous pass stopped here and called it, which was the right call. If you
-reach the point where the manifest is more fiction than fact, say so and stop:
-that conclusion is worth more than a manifest built on invented inputs.
+The fixtures are consistent inventions, clearly labelled as such, grounded in
+each service's real ports, environment and dependencies. If one makes the
+manifest easier than reality would, say so in the log — that would make the
+study worthless, and you are the person positioned to notice.
+
+**Anything still missing, invent and log.** If you reach a point where the
+manifest is more fiction than fact, say so and stop; that conclusion is worth
+more than a manifest built on invented inputs.
 
 ---
 
