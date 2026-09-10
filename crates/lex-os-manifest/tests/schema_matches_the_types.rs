@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use lex_os_manifest::{Actuation, Budget, Goal, Grant, IsolationFloor, Level, Manifest};
+use lex_os_manifest::{Actuation, Budget, Dimension, Goal, Grant, IsolationFloor, Level, Manifest};
 use serde_json::Value;
 
 fn schema() -> Value {
@@ -102,40 +102,81 @@ fn the_grant_properties_are_exactly_the_grant_fields() {
     assert_eq!(declared(&schema(), Some("Grant")), emitted(&g));
 }
 
-/// An enum the schema under-lists silently refuses a legal manifest; one
-/// it over-lists advertises a level that does not exist. Both are the
-/// schema lying, so both fail here.
+/// Each axis's enum must be exactly the levels that axis accepts.
+///
+/// This replaces a check of a single shared `Level` enum against all
+/// seven Rust variants — which passed while the schema was wrong, and is
+/// why the drift survived. The variants *were* all seven; what the
+/// schema got wrong was that they are not interchangeable, and no
+/// comparison against the whole set can notice that.
+///
+/// A cold-read participant hit it from the other side: they predicted
+/// `filesystem: "Allowlist"` would be accepted, because the schema said
+/// so in as many words, and the runtime refused it (lex-os#89, pass 3).
+/// The specification was describing behaviour that a fix had already
+/// removed.
 #[test]
-fn the_level_enum_is_exactly_the_variants() {
-    let all = [
-        Level::None,
-        Level::ReadOnly,
-        Level::Sandboxed,
-        Level::Loopback,
-        Level::ReadWrite,
-        Level::Allowlist,
-        Level::Full,
-    ];
-    let real: BTreeSet<String> = all
-        .iter()
-        .map(|l| {
-            serde_json::to_value(l)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-
+fn each_axis_lists_exactly_its_own_levels() {
     let s = schema();
-    let listed: BTreeSet<String> = s["$defs"]["Level"]["enum"]
-        .as_array()
-        .expect("Level must declare an enum")
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
+    for (dim, def) in [
+        (Dimension::Filesystem, "FilesystemLevel"),
+        (Dimension::Network, "NetworkLevel"),
+        (Dimension::Exec, "ExecLevel"),
+    ] {
+        let real: BTreeSet<String> = dim
+            .levels()
+            .iter()
+            .map(|l| {
+                serde_json::to_value(l)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
 
-    assert_eq!(listed, real, "the schema's Level list has drifted");
+        let listed: BTreeSet<String> = s["$defs"][def]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("$defs/{def} must declare an enum"))
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            listed, real,
+            "$defs/{def} has drifted from what {dim} accepts"
+        );
+    }
+}
+
+/// And the shared enum must be gone. Leaving it behind would let a
+/// future edit point an axis back at it and lose the check above without
+/// anything failing.
+#[test]
+fn there_is_no_shared_level_definition_left() {
+    let s = schema();
+    assert!(
+        s["$defs"]["Level"].is_null(),
+        "a shared `Level` is exactly the thing that let the schema claim axes are interchangeable"
+    );
+}
+
+/// Each axis must reference its own definition, not another's — the
+/// enums being right is no use if `exec` points at the filesystem's.
+#[test]
+fn each_grant_axis_references_its_own_definition() {
+    let s = schema();
+    for (field, def) in [
+        ("filesystem", "FilesystemLevel"),
+        ("network", "NetworkLevel"),
+        ("exec", "ExecLevel"),
+    ] {
+        assert_eq!(
+            s["$defs"]["Grant"]["properties"][field]["$ref"],
+            serde_json::json!(format!("#/$defs/{def}")),
+            "grant.{field} must reference $defs/{def}"
+        );
+    }
 }
 
 #[test]
