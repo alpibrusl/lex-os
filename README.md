@@ -61,6 +61,12 @@ is the shape of mistake that fails open and stays invisible.
 `_comment` is the one reserved key, since JSON has no comment syntax and it
 never reaches the content address.
 
+Each grant axis takes **its own** levels — filesystem `None`/`ReadOnly`/
+`ReadWrite`/`Full`, network `None`/`Loopback`/`Allowlist`/`Full`, exec
+`None`/`Sandboxed`/`Full`. They are not interchangeable, and a level from
+another axis is refused when the manifest is read
+([lex-lang#808](https://github.com/alpibrusl/lex-lang/issues/808)).
+
 ## Architecture
 
 ```
