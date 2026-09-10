@@ -112,9 +112,20 @@ say "4/7  Retiring the runner registered under $OLD_USER"
 # Deregister before uninstalling: a runner removed from GitHub's side
 # while its service still runs reconnects and re-registers itself.
 REMOVE_TOKEN=$(gh api -X POST "repos/$REPO/actions/runners/remove-token" -q .token)
-sudo "$OLD_DIR/svc.sh" stop || true
-sudo "$OLD_DIR/svc.sh" uninstall || true
-( cd "$OLD_DIR" && ./config.sh remove --token "$REMOVE_TOKEN" )
+# `svc.sh` and `config.sh` both refuse unless the working directory *is*
+# the runner root — "Must run from runner root or install is corrupt".
+# Calling them by absolute path fails, and `svc.sh uninstall` failing
+# leaves `config.sh remove` unable to proceed ("Uninstall service
+# first"), which is where the first run of this script stopped.
+cd "$OLD_DIR"
+if systemctl list-units 'actions.runner*' --all --no-legend 2>/dev/null | grep -q actions.runner; then
+  sudo ./svc.sh stop
+  sudo ./svc.sh uninstall
+else
+  echo "no runner service installed; nothing to stop"
+fi
+./config.sh remove --token "$REMOVE_TOKEN"
+cd - >/dev/null
 
 # ---- 5. install under the new account -----------------------------------
 say "5/7  Installing under $NEW_USER"
@@ -139,7 +150,8 @@ sudo -u "$NEW_USER" -H bash -lc "cd '$NEW_DIR' && ./config.sh \
 
 # ---- 6. the service -----------------------------------------------------
 say "6/7  Installing the service"
-sudo "$NEW_DIR/svc.sh" install "$NEW_USER"
+# Same rule as step 4: from the runner root, not by absolute path.
+( cd "$NEW_DIR" && sudo ./svc.sh install "$NEW_USER" )
 UNIT=$(basename "$(sudo find /etc/systemd/system -maxdepth 1 -name 'actions.runner.*.service' | head -1)")
 [ -n "$UNIT" ] || die "could not find the installed unit under /etc/systemd/system"
 
@@ -156,7 +168,7 @@ ProtectHostname=yes:$PRIVATE_HOSTNAME
 EOF
   sudo systemctl daemon-reload
 fi
-sudo "$NEW_DIR/svc.sh" start
+( cd "$NEW_DIR" && sudo ./svc.sh start )
 sleep 3
 sudo systemctl --no-pager --full status "$UNIT" | head -8 || true
 
