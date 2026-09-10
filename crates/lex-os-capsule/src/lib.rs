@@ -457,8 +457,16 @@ impl Capsule {
         //     manifest (its required grant + egress, the consumer's budget so
         //     budgets trivially pass) and demand it narrows the consumer.
         //     This reuses the tested narrowing invariant verbatim.
+        //     The floor is the consumer's, stated rather than derived. A
+        //     contract declares a grant and an egress list; it has no
+        //     opinion about the isolation floor, and `Manifest::new`
+        //     would otherwise fill in the *minimum* the grant implies —
+        //     which reads as the capsule asking for a weaker boundary
+        //     when nothing of the sort was asked. Narrowing compares
+        //     floors now, so that difference has to be right.
         let requested = Manifest::new(consumer.goal.clone(), contract.requires, consumer.budget)
-            .with_egress(contract.egress.clone());
+            .with_egress(contract.egress.clone())
+            .with_floor(consumer.isolation_floor);
         Manifest::validate_narrowing(consumer, &requested).map_err(CapsuleError::Refused)?;
 
         // (5) Effective grant, stated as the design's rule literally. Because
