@@ -1,0 +1,100 @@
+name: kvm gate freshness
+
+# Has the real perimeter actually been exercised lately?
+#
+# `firecracker (KVM)` is the only thing here that proves the boundary is
+# a boundary rather than a simulation, and the only thing that cannot run
+# on GitHub's infrastructure — it needs /dev/kvm and root, so it runs on
+# a self-hosted machine that is not always switched on.
+#
+# When that machine is off, a scheduled run does not fail. It queues,
+# waits, and is eventually **cancelled**. A cancelled run looks like
+# nothing happened, because nothing did — so the gate can stop running
+# for weeks and no page anywhere turns red. The history already carries
+# some.
+#
+# It is the same failure this project has been bitten by before: CI that
+# only runs on push leaves a dormant repository looking green because
+# nothing re-ran to disagree. The fix is the same — check the DATE of the
+# last real run, not its colour.
+#
+# This job runs on GitHub's own runners on purpose, so it works precisely
+# when the self-hosted one does not.
+
+on:
+  schedule:
+    # Weekly. The threshold is in days, so checking more often would only
+    # add noise.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: "Fail if the last successful KVM run is older than this (default 10)."
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: When did the KVM gate last actually pass?
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ten days: long enough to sit through a holiday without crying
+          # wolf, short enough that a machine left off for a month is
+          # noticed while anyone still remembers why.
+          MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '10' }}
+          RUNS: repos/${{ github.repository }}/actions/runs?per_page=100
+        run: |
+          set -uo pipefail
+
+          last=$(gh api "$RUNS" -q '[.workflow_runs[]
+            | select(.name=="firecracker (KVM)" and .conclusion=="success")
+            | .updated_at] | max // ""')
+
+          if [ -z "$last" ]; then
+            echo "::error::no successful \`firecracker (KVM)\` run in the last 100 runs — the real perimeter has not been exercised in living memory"
+            exit 1
+          fi
+
+          age=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 86400 ))
+          echo "last successful KVM run: $last ($age day(s) ago)"
+
+          # Cancelled runs are the symptom worth naming: that is what a
+          # queued job becomes when no runner ever collects it, and it is
+          # indistinguishable from "quiet" at a glance.
+          cancelled=$(gh api "$RUNS" -q '[.workflow_runs[]
+            | select(.name=="firecracker (KVM)" and .conclusion=="cancelled")] | length')
+          if [ "$cancelled" -gt 0 ]; then
+            echo "note: $cancelled cancelled run(s) in this window — a queued job with no runner to collect it"
+          fi
+
+          if [ "$age" -le "$MAX_AGE_DAYS" ]; then
+            echo "the gate is fresh"
+            exit 0
+          fi
+
+          echo "::error::the KVM gate has not passed in $age days (threshold $MAX_AGE_DAYS)"
+          echo ""
+          echo "Nothing is broken, and that is the problem: a self-hosted runner that is"
+          echo "switched off produces cancelled runs, not failed ones, so this gate goes"
+          echo "quiet rather than red."
+          echo ""
+          echo "Either the machine has been off, or the runner service is not coming up"
+          echo "on boot. Check, in order:"
+          echo ""
+          echo "  gh api repos/$GITHUB_REPOSITORY/actions/runners -q '.runners[] | \"\\(.name) \\(.status)\"'"
+          echo "  # then, on the host:"
+          echo "  systemctl status 'actions.runner.*'"
+          echo ""
+          echo "If it is only ever up while someone is using the machine, install the"
+          echo "runner as a service rather than running ./run.sh by hand — see"
+          echo "docs/self-hosted-kvm-runner.md, step 3."
+          echo ""
+          echo "Then dispatch one to close the gap:"
+          echo ""
+          echo "  gh workflow run \"firecracker (KVM)\""
+          exit 1
