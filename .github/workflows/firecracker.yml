@@ -35,6 +35,32 @@ jobs:
     # Requires a self-hosted runner with KVM + root + the firecracker assets.
     runs-on: [self-hosted, kvm]
     steps:
+      # First, before anything can print a path. This repository is
+      # public, so every line these steps emit is readable by anyone.
+      #
+      # A self-hosted runner writes its own working directory into the
+      # log of every job — about fifty lines a run — and that directory
+      # contains the OS user's name. The account should not be a person's
+      # (docs/self-hosted-kvm-runner.md § 0), but that is a property of
+      # how the runner was registered, and this workflow cannot check it.
+      # So it masks instead: `add-mask` replaces the value with `***`
+      # everywhere it appears in the rest of the job.
+      #
+      # This does NOT reach the `Set up job` group, which the runner
+      # emits before any step of ours exists — that is where
+      # `Machine name:` lives, and a private UTS namespace on the runner
+      # service is the only thing that answers it (same doc). Masking is
+      # the layer that catches what the *steps* say, including things
+      # nobody has thought of yet.
+      - name: Mask the host's identifiers before anything prints them
+        run: |
+          # Never echo these; `add-mask` is the only thing that sees them.
+          echo "::add-mask::$(hostname)"
+          echo "::add-mask::$(hostname -s)"
+          echo "::add-mask::$HOME"
+          echo "::add-mask::$(whoami)"
+          echo "masked: hostname, short hostname, home directory, user"
+
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Build with the real perimeter (firecracker is the DEFAULT feature)

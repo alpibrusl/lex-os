@@ -149,6 +149,28 @@ runbook used to suggest — therefore publishes the hostname of a machine
 somebody owns, next to a document explaining that it has passwordless
 sudo. `kvm-1` says everything the workflow needs to know.
 
+### The three layers, and which one you are relying on
+
+Prevention here is layered because the first layer is not something any
+workflow can check:
+
+| | catches | cannot catch |
+| --- | --- | --- |
+| **The account** (§ 0) | everything, at the source | nothing — but it is a property of how the runner was *registered*, so a workflow cannot verify it |
+| **`::add-mask::`** in `firecracker.yml` | whatever the job's **steps** emit, including things nobody anticipated | the `Set up job` group, which the runner writes before any step exists — that is where `Machine name:` lives |
+| **`log-scan.yml`** | whatever the other two miss, daily | anything already read by someone before the scan ran |
+
+The middle one is worth understanding. `::add-mask::` replaces a value
+with `***` for the rest of the job, so the ~50 working-directory lines
+become harmless even on a runner registered under a person's account.
+It runs as the first step, before `actions/checkout` can print a path.
+
+The scanner's patterns live in the `LOG_LEAK_PATTERNS` repository secret
+rather than in the workflow, for a reason worth stating: a detector that
+named what it was looking for would publish the very string it exists to
+keep out of public logs. Nothing in that job echoes a pattern or a match
+— only a count.
+
 ### Cleaning up logs that already leaked
 
 Deleting a run's logs keeps the run itself — the green tick and its timing
