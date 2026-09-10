@@ -1,0 +1,117 @@
+name: log scan
+
+# Does any public run log contain something about the self-hosted host
+# that should not be public?
+#
+# This exists because the answer was yes, twice, and both times a person
+# noticed rather than a machine. The runner writes its working directory
+# into every job's log; on a public repository that is readable by
+# anyone. It was purged by hand, and eight more appeared the next day
+# from ordinary pushes.
+#
+# Three layers now stand between that and a public log:
+#
+#   1. the runner's OS account should not be a person's
+#      (docs/self-hosted-kvm-runner.md § 0) — prevention, but a property
+#      of how the runner was registered, which no workflow can check;
+#   2. `::add-mask::` at the top of the KVM job — catches whatever the
+#      *steps* emit, including things nobody has anticipated;
+#   3. this — the backstop, for whatever the first two miss.
+#
+# ## Why the patterns are a secret
+#
+# A detector normally names what it looks for. This one cannot: writing
+# the hostname into a public workflow file would publish the very string
+# it exists to keep out of public logs. So the patterns live in the
+# `LOG_LEAK_PATTERNS` repository secret, one per line, and nothing here
+# ever echoes them — GitHub also masks secrets in logs, which makes the
+# failure output safe by construction.
+#
+# Set it with, e.g.:
+#   printf 'somehostname\n/home/someuser\n' | \
+#     gh secret set LOG_LEAK_PATTERNS -R alpibrusl/lex-os
+#
+# With the secret unset this job says so and passes: a detector that
+# fails closed on a repository that never configured it would just be
+# noise, and the thing it protects is only present on repos with a
+# self-hosted runner.
+
+on:
+  schedule:
+    # Daily, after the nightly KVM run has had time to finish.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many recent runs to scan (default 20)."
+        required: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Scan recent run logs for host identifiers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PATTERNS: ${{ secrets.LOG_LEAK_PATTERNS }}
+          LIMIT: ${{ github.event.inputs.limit || '20' }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${PATTERNS:-}" ]; then
+            echo "::notice::LOG_LEAK_PATTERNS is not set, so there is nothing to look for."
+            echo "See the comment at the top of this workflow for how to set it."
+            exit 0
+          fi
+
+          # The patterns reach grep through a file rather than a command
+          # line: argv is visible in the runner's own process list, and
+          # this job's whole purpose is not leaking these strings.
+          umask 077
+          printf '%s\n' "$PATTERNS" | grep -v '^[[:space:]]*$' > /tmp/patterns
+          echo "looking for $(wc -l < /tmp/patterns) pattern(s)"
+
+          gh run list -R "$GITHUB_REPOSITORY" --limit "$LIMIT" \
+            --json databaseId,workflowName,createdAt,conclusion \
+            -q '.[] | select(.conclusion=="success") | "\(.databaseId) \(.createdAt[0:16]) \(.workflowName)"' \
+            > /tmp/runs || { echo "could not list runs"; exit 1; }
+
+          dirty=0
+          while read -r id when name; do
+            [ -z "$id" ] && continue
+            # A run whose logs are already gone is not a finding.
+            log=$(gh run view "$id" -R "$GITHUB_REPOSITORY" --log 2>/dev/null) || continue
+            [ -z "$log" ] && continue
+            # -c counts lines, and never prints them: a detector that
+            # echoed the match would publish what it is protecting.
+            hits=$(printf '%s' "$log" | grep -c -F -f /tmp/patterns) || hits=0
+            if [ "$hits" -gt 0 ]; then
+              echo "::error::run $id ($when, $name) has $hits line(s) matching a configured pattern"
+              dirty=$((dirty + 1))
+            fi
+          done < /tmp/runs
+          rm -f /tmp/patterns
+
+          if [ "$dirty" -gt 0 ]; then
+            echo
+            echo "$dirty run(s) carry host identifiers in public logs."
+            echo
+            echo "Purge one with:"
+            echo "  gh api -X DELETE repos/$GITHUB_REPOSITORY/actions/runs/<id>/logs"
+            echo
+            echo "That deletes the logs and keeps the run, so the green tick and its"
+            echo "timing survive. Verify against the API rather than \`gh run view --log\`,"
+            echo "which serves a cached copy and will show the old text after a deletion:"
+            echo "  gh api repos/$GITHUB_REPOSITORY/actions/runs/<id>/logs -i --silent | head -1"
+            echo
+            echo "Then fix the cause, or this recurs on the next push:"
+            echo "  docs/self-hosted-kvm-runner.md"
+            exit 1
+          fi
+          echo "no configured pattern appears in the last $LIMIT successful run(s)"
