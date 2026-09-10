@@ -295,7 +295,7 @@ other two are refused.
 | jailer: `cgroup ... already exists` / cgroup errors | Stale jail from a killed run. `sudo rm -rf /srv/jailer/firecracker/*` and `sudo rmdir /sys/fs/cgroup/firecracker/* 2>/dev/null`. The host is cgroup v2 (the perimeter passes `--cgroup-version 2`). |
 | `ip tuntap add ... Device or resource busy` | A leftover `tap-lex0` from a crashed run. `sudo ip link delete tap-lex0`. |
 | musl build warning in setup-assets | `rustup target add "$(uname -m)-unknown-linux-musl"`. Not needed for `wall2`, but the agent demos inject the guest binary. |
-| Runner offline for the nightly cron | Install it as a service (Step 3), not just `./run.sh`. |
+| Runner offline for the nightly cron | Install it as a service (Step 3), not just `./run.sh`. A queued job with no runner is eventually **cancelled**, not failed — see below. |
 
 ## What runs it automatically, and what must not
 
@@ -308,6 +308,28 @@ to dispatch this (#54).
 `push` is safe here for one specific reason: only people who can push to
 this repository can start it. That is the whole property, and the next
 section is about the trigger that would destroy it.
+
+## A machine that is not always on
+
+If the host is a laptop, the gate goes quiet rather than red when it is
+shut. A scheduled run with no runner to collect it queues, waits, and is
+eventually **cancelled** — and a cancelled run is indistinguishable from
+"nothing needed doing" at a glance. The gate can stop running for weeks
+with nothing anywhere turning red.
+
+That is the same trap as CI that only runs on push: a dormant repository
+looks green because nothing re-ran to disagree. The answer is the same —
+check the *date* of the last real run, not its colour.
+
+[`kvm-gate-freshness.yml`](../.github/workflows/kvm-gate-freshness.yml)
+does that weekly, and runs on GitHub's own infrastructure on purpose, so
+it works precisely when this host does not. It fails if the last
+successful run is older than ten days: long enough to sit through a
+holiday, short enough that a month of silence is noticed while anyone
+still remembers why.
+
+It also reports the cancelled count, because that number *is* the
+symptom and nothing else surfaces it.
 
 ## Do not add a `pull_request` trigger
 
