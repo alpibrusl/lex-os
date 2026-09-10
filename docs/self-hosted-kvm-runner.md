@@ -101,6 +101,25 @@ sudo systemctl edit actions.runner.<owner>-<repo>.<name>.service
 That is a private UTS namespace for the unit alone. Deleting the drop-in
 reverts it.
 
+### Already registered under a personal account?
+
+[`scripts/migrate-runner-account.sh`](../scripts/migrate-runner-account.sh)
+moves an existing runner across: it creates the service account, copies
+the installation, deregisters and re-registers, and installs the service
+with a private hostname. It reads the current account and the runner's
+location from the environment, so it carries no username or hostname of
+its own.
+
+```sh
+bash scripts/migrate-runner-account.sh
+NEW_USER=ci-runner NEW_HOME=/opt/ci bash scripts/migrate-runner-account.sh
+```
+
+It refuses rather than guesses: no runner where it expected one, no
+passwordless sudo, no authenticated `gh`, a job in flight, or already
+running as the target account. It prints what it is about to do and asks
+before touching anything, and it leaves the old directory in place.
+
 ## 1. Passwordless sudo (required)
 
 CI is non-interactive and the job calls `sudo`. Grant the **runner's** user
