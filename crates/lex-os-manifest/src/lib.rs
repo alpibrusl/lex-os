@@ -230,6 +230,14 @@ pub enum ManifestError {
         "egress widening: child manifest adds host `{host}` not present in the parent's egress allowlist (a child may only narrow)"
     )]
     EgressWidens { host: String },
+    #[error(
+        "isolation widening: child manifest asks for floor `{child}`, which is weaker than \
+         the parent's `{parent}` (a child may raise the floor, never lower it)"
+    )]
+    IsolationWidens {
+        parent: &'static str,
+        child: &'static str,
+    },
     #[error("budget widening on {field}: child requests {requested} > parent {parent}")]
     BudgetWidens {
         field: &'static str,
@@ -247,7 +255,30 @@ pub enum ManifestError {
     FacetUnreadable { facet: &'static str, detail: String },
 }
 
+/// An egress entry split into host and port, with the same default the
+/// perimeter applies: a bare host means 443
+/// (`lex_os_perimeter::firecracker::net::parse_host_port`). Kept in step
+/// with it deliberately — a narrowing check that disagreed with the wall
+/// about what an entry means would be checking a different grant than
+/// the one enforced.
+fn split_host_port(entry: &str) -> (&str, u16) {
+    match entry.split_once(':') {
+        Some((host, port)) => (host, port.parse().unwrap_or(443)),
+        None => (entry, 443),
+    }
+}
+
 impl Manifest {
+    /// A manifest with the isolation floor the grant *implies* — the
+    /// weakest boundary that grant could run under.
+    ///
+    /// That makes it the wrong constructor for building a **child** to
+    /// narrow against a parent: a child with a smaller grant implies a
+    /// smaller floor, and since narrowing compares floors, it would be
+    /// refused for asking to run in a weaker box than the parent
+    /// demanded. When deriving a child, set the floor with
+    /// [`Manifest::with_floor`] — usually to the parent's — or use
+    /// [`Manifest::narrow_to`], which already raises it.
     pub fn new(goal: Goal, grant: Grant, budget: Budget) -> Self {
         let isolation_floor = IsolationFloor::implied_by(&grant);
         Self {
@@ -321,16 +352,43 @@ impl Manifest {
     ) -> Result<(), ManifestError> {
         // Grant: child must be ≤ parent on the trust lattice.
         Grant::narrow(&parent.grant, &child.grant)?;
-        // Egress: every child host must already be allowed by the parent.
-        for host in &child.egress {
-            let bare = host.split(':').next().unwrap_or(host);
-            let covered = parent
-                .egress
-                .iter()
-                .any(|p| lex_types::trust::host_matches(p, bare));
+        // Egress: every child entry must already be allowed by the parent,
+        // **port included**.
+        //
+        // The port is not decorative. `lex-os-perimeter` parses each entry
+        // and pins an iptables ACCEPT to that host *and* that port, with a
+        // bare host meaning 443 — so a child that keeps an authorised host
+        // and changes `:443` to `:8443` opens a port the parent never
+        // granted, and the kernel wall then enforces the child's number.
+        //
+        // The previous version stripped the child's port before comparing,
+        // and `host_matches` strips the parent's, so the port was never
+        // compared at all. `host_matches` is left alone: the runtime effect
+        // check uses it to test a bare host against an allowlist entry,
+        // where ignoring the entry's port is correct.
+        for entry in &child.egress {
+            let (host, port) = split_host_port(entry);
+            let covered = parent.egress.iter().any(|p| {
+                let (_, parent_port) = split_host_port(p);
+                parent_port == port && lex_types::trust::host_matches(p, host)
+            });
             if !covered {
-                return Err(ManifestError::EgressWidens { host: host.clone() });
+                return Err(ManifestError::EgressWidens {
+                    host: entry.clone(),
+                });
             }
+        }
+
+        // Isolation floor: a child may demand a *stronger* boundary than
+        // its parent, never a weaker one. This was missing entirely, so a
+        // child could take a `MicroVm` ceiling down to `Namespace` and
+        // narrow cleanly — the one axis where "narrower" means a larger
+        // value, which is presumably how it was overlooked.
+        if child.isolation_floor < parent.isolation_floor {
+            return Err(ManifestError::IsolationWidens {
+                parent: parent.isolation_floor.as_str(),
+                child: child.isolation_floor.as_str(),
+            });
         }
         // Budgets: no ceiling may exceed the parent's.
         let checks: [(&'static str, u64, u64); 4] = [
@@ -566,7 +624,13 @@ mod tests {
             Grant::new(Level::ReadOnly, Level::None, Level::None),
             Budget::research_default(),
         )
-        .with_egress(vec!["results.demo.internal".into()]);
+        // The floor is set explicitly rather than left to `Manifest::new`,
+        // which derives the *minimum* the grant implies — for a no-exec
+        // grant that is `Namespace`, weaker than this parent demands, and
+        // narrowing now compares floors. This test is about egress, so it
+        // says so instead of accidentally testing something else.
+        .with_egress(vec!["results.demo.internal".into()])
+        .with_floor(parent.isolation_floor);
         assert!(Manifest::validate_narrowing(&parent, &ok_child).is_ok());
 
         // Child tries to add a host the parent never allowed.
