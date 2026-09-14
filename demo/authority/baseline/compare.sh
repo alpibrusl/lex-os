@@ -1,38 +1,75 @@
 #!/usr/bin/env bash
-# The point of the baseline, in two diffs.
+# The baseline, in the strongest form the ecosystem has.
 set -uo pipefail
 cd "$(dirname "$0")"
 
-echo "  1. the source diff — the change is right there, a dozen lines:"
-diff -u v1_report.py v2_report.py | sed 's/^/     /'
+cat <<'TXT'
+  Deno, not Python: the point is not that Lex beats a runtime with no
+  authority model. It is that it answers a question the best existing
+  one still cannot. Deno's permissions are genuinely good — default
+  deny, per-host network, per-path filesystem, per-variable environment,
+  enforced by the runtime — and everything below assumes that.
+
+TXT
+
+echo "  1. the source diff — the change is right there:"
+diff -u deno/v1_report.ts deno/v2_report.ts | sed 's/^/     /'
 
 echo
-echo "  2. the policy diff — what the sandbox knows about that change:"
-echo "     the sandbox for this job is three files:"
-for f in Dockerfile seccomp.json networkpolicy.yaml; do
-  printf '       %-20s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"
-done
-echo "     v2 requires an edit to none of them, so the diff is empty."
+echo "  2. the artifact that carries the authority:"
+echo "     deno/launch.sh —"
+sed -n '/^exec/,$p' deno/launch.sh | sed 's/^/       /'
+echo "     unchanged between v1 and v2, and nothing made it change."
 
 cat <<'TXT'
 
-  There is no third artifact to diff. The authority this code claims is
-  not written down anywhere a reviewer or a CI job can read it:
+  What Deno does here, and does well: at run time it refuses the
+  telemetry fetch. `PermissionDenied: Requires net access to
+  "telemetry.vendor.example"`. That is a real wall, and it holds.
 
-    - the Dockerfile says which packages exist, not which hosts are reached;
-    - seccomp says connect(2) is permitted, not to where;
-    - the NetworkPolicy names one destination, but nothing ties it to the
-      code — it neither knows v2 added a second host nor fails when it did.
+  Four things it still cannot do, none of them a missing feature:
 
-  Two ways to find out are available, and both are worse:
+    - It cannot tell you what the program needs. `fetch(url)` takes a
+      runtime value, so the set of hosts a JavaScript program may reach
+      is not a property any tool can read off the source. Lex's effect
+      rows are that property, and the type checker has already refused
+      any row that lies about its body.
 
-    - run it and watch the traffic. That reports what one run did, not what
-      the code can do. A telemetry push behind `if token:` is invisible on
-      any run without the token set.
-    - read the diff and notice. Which is the thing that does not scale, and
-      the reason this demo exists.
+    - Authority is process-wide, not per-function. `--allow-net=a,b`
+      grants both hosts to every line that runs, transitive dependencies
+      included. There is no sense in which `submit` may reach the
+      results endpoint and `pushTelemetry` may not.
 
-  The NetworkPolicy would eventually stop v2 — at run time, in the
-  environment that has the token, as an opaque connection timeout, after
-  the deploy. Not before the change was approved.
+    - There is no delta. Nothing about v2 changes any file a CI job
+      could refuse on. If a human does update the flags, that edit is
+      the only signal there is — written by the same human who would
+      have had to notice in the first place.
+
+    - The flags only ever grow. Nobody removes `--allow-read` because
+      nobody can prove it is unused. `lex-os authority narrow` removes
+      it on a proof.
+
+  So the refusal arrives at run time, in the environment that has the
+  token, on the code path that happens to run, after the deploy — and
+  it never arrives at all for a path that does not run that day.
+  `lex-os authority gate` refuses the same change before it is merged,
+  and names the host that caused it.
+
+  The same holds for WASI, whose capabilities (preopened directories,
+  granted sockets) are likewise handed in from outside rather than read
+  out of the code.
+
+TXT
+
+echo "  And the common case — Python behind a container sandbox:"
+echo "     the sandbox for that job is three files:"
+for f in python-docker/Dockerfile python-docker/seccomp.json python-docker/networkpolicy.yaml; do
+  printf '       %-34s %s bytes\n' "$f" "$(wc -c < "$f" | tr -d ' ')"
+done
+cat <<'TXT'
+     v2 requires an edit to none of them, and none of them would refuse
+     it either: the Dockerfile says which packages exist, not which
+     hosts are reached; seccomp says connect(2) is permitted, not to
+     where; the NetworkPolicy names one destination but nothing ties it
+     to the code. Strictly weaker than the Deno case above.
 TXT

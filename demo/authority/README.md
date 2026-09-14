@@ -159,35 +159,98 @@ runtime host is not statically known, so no entry can be proved unused
 and shedding one might break the job. Refusing to narrow what it cannot
 prove is the discipline, not a gap in it.
 
-## The baseline
-
-`baseline/` is the same change in Python behind an ordinary container
-sandbox — a Dockerfile, a seccomp profile, a Kubernetes NetworkPolicy.
+## The baseline: Deno, not Python
 
 ```sh
 bash demo/authority/baseline/compare.sh
 ```
 
-The source diff is a dozen lines. The policy diff is empty: v2 requires an
-edit to none of the three files, and none of them notices. There is no
-third artifact to diff, because the authority the code claims is not
-written down anywhere a reviewer or a CI job can read it.
+The comparison worth making is not against a runtime with no authority
+model. It is against the best one in wide use. `baseline/deno/` is the
+same change in TypeScript, launched the way Deno intends:
 
-- the Dockerfile says which packages exist, not which hosts are reached;
-- seccomp says `connect(2)` is permitted, not to where;
-- the NetworkPolicy names one destination, but nothing ties it to the
-  code — it neither knows v2 added a second host nor fails when it did.
+```sh
+deno run --allow-net=results.demo.internal v1_report.ts
+```
 
-The two available alternatives are both worse. *Run it and watch the
-traffic* reports what one run did, not what the code can do — a
-telemetry push behind `if token:` is invisible on any run without the
-token set. *Read the diff and notice* is the thing that stops scaling
-the moment an agent writes more code than you read, which is the premise
-of this whole project.
+Deno's permissions are genuinely good: default deny, per-host network,
+per-path filesystem, per-variable environment, enforced by the runtime.
+Run v2 under that same command line and Deno **refuses** the telemetry
+fetch — `PermissionDenied: Requires net access to
+"telemetry.vendor.example"`. That is a real wall and it holds.
 
-The NetworkPolicy would eventually stop v2 — at run time, in the
-environment that has the token, as an opaque connection timeout, after
-the deploy. Not before the change was approved.
+Four things it still cannot do, and none of them is a missing feature:
+
+- **It cannot tell you what the program needs.** `fetch(url)` takes a
+  runtime value, so the set of hosts a JavaScript program may reach is
+  not a property any tool can read off the source. Lex's effect rows
+  *are* that property, and the type checker has already refused any row
+  that lies about its body. This is the whole asymmetry; everything else
+  follows from it.
+- **Authority is process-wide, not per-function.** `--allow-net=a,b`
+  grants both hosts to every line that runs, transitive dependencies
+  included. There is no sense in which `submit` may reach the results
+  endpoint and `pushTelemetry` may not. `lex authority derive` names
+  which function needs which effect.
+- **There is no delta.** Nothing about v2 changes a file a CI job could
+  refuse on. If a human updates the flags, that edit is the only signal
+  there is — written by the same human who had to notice first.
+- **The flags only ever grow.** Nobody removes `--allow-read` because
+  nobody can prove it unused. `authority narrow` removes it on a proof.
+
+So Deno's refusal arrives at run time, in the environment that has the
+token, on the code path that happens to run, after the deploy — and
+never at all for a path that does not run that day. `authority gate`
+refuses the same change before it merges, and names the host.
+
+The same shape applies to WASI, whose capabilities (preopened
+directories, granted sockets) are likewise handed in from outside rather
+than read out of the code.
+
+`baseline/python-docker/` keeps the common case — a Dockerfile, a
+seccomp profile, a Kubernetes NetworkPolicy — which is strictly weaker
+again: the Dockerfile says which packages exist, not which hosts are
+reached; seccomp says `connect(2)` is permitted, not to where; the
+NetworkPolicy names one destination but nothing ties it to the code.
+
+## The same derivation without lex-os
+
+The fold lives upstream in `lex_types::authority`, so the authoring
+toolchain answers the same question with no manifest in sight:
+
+```sh
+lex authority derive src/
+lex authority diff --base old/ --head src/ --fail-on widening
+```
+
+`lex authority` takes a whole package, and names the **contributors** —
+which function is why each effect is in the answer:
+
+```
+$ lex authority derive v2_agent_improved.lex
+  env          push_telemetry, telemetry_token
+  io           announce
+  net          push_telemetry, submit
+```
+
+`lex-os authority` adds the half that needs a manifest — `gate` and
+`narrow` — because only lex-os knows what box the code was approved for.
+
+## Running a non-Lex agent in the box
+
+Worth being exact about, because the two halves cover different things.
+The static wall needs effect rows, so it applies to Lex code and to
+nothing else; the perimeter applies to anything the box can run. A
+coding agent — a Node binary — gets the runtime half in full (a
+disposable microVM, the egress allowlist as its only route out, a budget
+in integer cents, `exec` mediation, a hash-chained log it cannot reach)
+and the static half not at all.
+
+Where the static half earns its keep for such an agent is on the *other*
+side of the box: what the agent **writes**. If its output is Lex, the
+authority delta on its branch answers the question it cannot answer
+about itself — *did this change claim new reach?* — which is exactly the
+review in Act 2 above, run against an agent's PR instead of a human's.
 
 ## Using it in CI
 

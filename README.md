@@ -150,9 +150,59 @@ direction a hand-maintained policy never goes: *down*.
 bash demo/authority/run.sh   # three acts, no KVM, no network, no box
 ```
 
-The demo's `baseline/` is the same change in Python behind a Dockerfile,
-a seccomp profile and a NetworkPolicy: the source diff is a dozen lines,
-the policy diff is empty, and there is no third artifact to diff.
+The demo's `baseline/` is the same change under the strongest authority
+model in wide use — **Deno**, with `--allow-net=host`, `--allow-read`,
+`--allow-env`, default deny. Deno refuses the new host at run time, and
+that wall holds. What it cannot do is say what the program needs
+(`fetch(url)` takes a runtime value, so no tool can read the host set
+off the source), scope authority to a function rather than the process,
+produce a delta a CI job can refuse on, or ever shed a flag. The
+Python-behind-a-container case is in `baseline/python-docker/` and is
+strictly weaker than that.
+
+### The same derivation, upstream
+
+The fold lives in `lex-lang`'s `lex_types::authority`, so the authoring
+toolchain answers the same question without lex-os in the loop:
+
+```sh
+lex authority derive src/                                  # least grant, per package
+lex authority diff --base old/ --head src/ --fail-on widening
+```
+
+`lex authority` additionally names the **contributors** — which function
+is why each effect is in the answer — because "this package needs `net`"
+is a worse review than "`push_telemetry` needs `net`". lex-os adds the
+half that needs a manifest: `gate` and `narrow`.
+
+### Running a non-Lex agent in the box
+
+The two enforcement points do different jobs, and only one of them
+applies to an arbitrary binary:
+
+| Workload | Static wall (`check` / `authority`) | Perimeter (grant → sandbox) | Audit chain |
+| --- | --- | --- | --- |
+| Lex agent code | **yes** — effects derived and gated before it runs | yes | yes |
+| Any binary — node, python, a coding agent | **no** — there is nothing to derive from | yes | yes |
+
+So a coding agent running inside lex-os gets the runtime half in full: a
+disposable microVM, an egress allowlist that is the only route out, a
+budget in integer cents, `exec` mediation with a reversibility
+classification, and a hash-chained log on the far side of a boundary it
+has no syscall to reach. That is exactly what "free inside the box,
+sealed at the edge" is for — interior freedom costs nothing when the
+edge is the boundary. What it does *not* get is a derived grant: no
+effect rows, nothing to fold, so the perimeter is the whole static
+story for the binary itself.
+
+The static half applies to the other side of that box — **what the agent
+writes**. If its output is Lex, the authority delta on its branch
+answers the question the agent cannot answer about itself:
+
+```text
+lex-os run          → the agent works inside a sealed box (perimeter + budget + audit)
+lex authority diff  → what it produced is gated on the authority delta, before merge
+```
 
 ## Try it
 
