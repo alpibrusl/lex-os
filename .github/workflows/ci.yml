@@ -65,5 +65,13 @@ jobs:
       # every PR rather than trusted to still work. `demo_acts.rs` already
       # asserts the three verdicts against the same fixture files; this
       # catches the other half, a script that no longer executes.
+      # Deno is installed so baseline/compare.sh takes its *live* path and
+      # really runs the v2 fixture under v1's command line. Without it the
+      # script falls back to a recorded transcript, which is exactly the
+      # kind of claim that rots unnoticed — the whole point of running the
+      # runbook here. It ships as an npm package, so no extra toolchain.
+      - name: Install deno (for the baseline comparison)
+        run: npm i --no-save deno && echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+
       - name: The authority demo still runs
         run: bash demo/authority/run.sh

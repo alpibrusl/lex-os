@@ -175,9 +175,31 @@ deno run --allow-net=results.demo.internal v1_report.ts
 
 Deno's permissions are genuinely good: default deny, per-host network,
 per-path filesystem, per-variable environment, enforced by the runtime.
-Run v2 under that same command line and Deno **refuses** the telemetry
-fetch — `PermissionDenied: Requires net access to
-"telemetry.vendor.example"`. That is a real wall and it holds.
+Run v2 under that same command line and Deno **refuses** — this is
+`baseline/compare.sh` executing it, not a description of it:
+
+```
+$ deno run --allow-net=results.demo.internal drive_v2.ts
+report built: runs=120 failures=3
+telemetry: REFUSED by Deno — NotCapable
+  NotCapable: Requires env access to "TELEMETRY_TOKEN", run again with the --allow-env flag
+```
+
+That is a real wall and it holds. Note *where* it landed, though: on the
+environment read, because that is what the code reached first. Permit
+the variable and the refusal moves down to the fetch:
+
+```
+$ TELEMETRY_TOKEN=… deno run --allow-net=results.demo.internal \
+    --allow-env=TELEMETRY_TOKEN drive_v2.ts
+telemetry: REFUSED by Deno — NotCapable
+  NotCapable: Requires net access to "telemetry.vendor.example:443", run again with the --allow-net flag
+```
+
+The wall is wherever execution happens to arrive, in the order it
+arrives — never a statement about the program. Had `pushTelemetry` sat
+behind a feature flag, an error path or a nightly branch, neither
+refusal would have fired today and the deploy would have looked clean.
 
 Four things it still cannot do, and none of them is a missing feature:
 

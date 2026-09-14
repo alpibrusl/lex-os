@@ -21,11 +21,46 @@ echo "     deno/launch.sh —"
 sed -n '/^exec/,$p' deno/launch.sh | sed 's/^/       /'
 echo "     unchanged between v1 and v2, and nothing made it change."
 
+echo
+echo "  3. what Deno does here, and does well — run, not described:"
+echo
+if command -v deno >/dev/null 2>&1; then
+  echo "     \$ deno run --allow-net=results.demo.internal drive_v2.ts"
+  (cd deno && deno run --allow-net=results.demo.internal drive_v2.ts 2>&1)
+  echo
+  echo "     The token read is what it reached first. Permit that, and the"
+  echo "     refusal moves down to the fetch:"
+  echo
+  echo "     \$ TELEMETRY_TOKEN=… deno run --allow-net=results.demo.internal \\"
+  echo "         --allow-env=TELEMETRY_TOKEN drive_v2.ts"
+  (cd deno && TELEMETRY_TOKEN=demo-token deno run \
+      --allow-net=results.demo.internal \
+      --allow-env=TELEMETRY_TOKEN drive_v2.ts 2>&1)
+else
+  echo "     deno is not installed here, so this is the recorded transcript"
+  echo "     of the two runs above, from deno 2.9.6. Install deno (or"
+  echo "     \`npm i deno\`) and re-run this script to reproduce it:"
+  echo
+  echo "     \$ deno run --allow-net=results.demo.internal drive_v2.ts"
+  echo "     report built: runs=120 failures=3"
+  echo "     telemetry: REFUSED by Deno — NotCapable"
+  echo "       NotCapable: Requires env access to \"TELEMETRY_TOKEN\", run again with the --allow-env flag"
+  echo
+  echo "     \$ TELEMETRY_TOKEN=… deno run --allow-net=results.demo.internal \\"
+  echo "         --allow-env=TELEMETRY_TOKEN drive_v2.ts"
+  echo "     report built: runs=120 failures=3"
+  echo "     telemetry: REFUSED by Deno — NotCapable"
+  echo "       NotCapable: Requires net access to \"telemetry.vendor.example:443\", run again with the --allow-net flag"
+fi
+
 cat <<'TXT'
 
-  What Deno does here, and does well: at run time it refuses the
-  telemetry fetch. `PermissionDenied: Requires net access to
-  "telemetry.vendor.example"`. That is a real wall, and it holds.
+  That is a real wall, and it holds. Note where it landed, though: on
+  the env read, because that is what the code reached first. The wall
+  is wherever execution happens to arrive, in the order it arrives —
+  not a statement about the program. Had `pushTelemetry` sat behind a
+  feature flag, an error path, or a nightly branch, neither refusal
+  would have fired today, and the deploy would have looked clean.
 
   Four things it still cannot do, none of them a missing feature:
 
