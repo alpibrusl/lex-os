@@ -31,6 +31,7 @@ lex-os-capsule.workspace = true
 lex-os-supervisor.workspace = true
 lex-os-audit.workspace = true
 lex-os-check.workspace = true
+lex-os-authority.workspace = true
 lex-os-proto.workspace = true
 lex-bytecode.workspace = true
 lex-syntax.workspace = true

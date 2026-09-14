@@ -70,19 +70,8 @@ pub fn check_source_against_grant(
     grant: &Grant,
     egress: &[String],
 ) -> Result<CheckReport, CheckError> {
-    // 1. Parse.
-    let program = lex_syntax::parse_source(src).map_err(|e| CheckError::Parse(format!("{e:?}")))?;
-
-    // 2. Canonicalize to typed-AST stages.
-    let stages = lex_ast::canonicalize_program(&program);
-
-    // 3. Type-check — rejects dishonest effect rows (a `[io]` signature
-    //    hiding a `[net]` call), exactly as the toolchain would.
-    lex_types::check_program(&stages)
-        .map_err(|errs| CheckError::TypeCheck(format!("{} error(s): {:?}", errs.len(), errs)))?;
-
-    // 4. Collect the program's declared effects.
-    let effects = collect_effects(&stages);
+    // 1-4. Parse, canonicalize, type-check, collect declared effects.
+    let effects = effects_of_source(src)?;
 
     // 5a. Coarse wall: every effect must fit the grant's dimensions and
     //     levels (bare `[net]` needs network ≥ allowlist, `[proc]` needs
@@ -112,6 +101,33 @@ pub fn check_source_against_grant(
     Ok(report(&effects))
 }
 
+/// Run `src` through the real Lex front-end and return the typed
+/// [`EffectSet`] its functions declare.
+///
+/// This is steps 1-4 of [`check_source_against_grant`] without the
+/// grant comparison: parse, canonicalize, type-check (so a dishonest
+/// effect row is rejected here, not carried forward), then collect.
+/// Split out because the effect set is the input to *both* enforcement
+/// questions — "does this fit the grant we were given?" (this crate)
+/// and "what is the least grant that would fit it?"
+/// (`lex-os-authority`) — and both must read the same effects from the
+/// same front-end, or the wall and the derivation could disagree.
+pub fn effects_of_source(src: &str) -> Result<EffectSet, CheckError> {
+    // 1. Parse.
+    let program = lex_syntax::parse_source(src).map_err(|e| CheckError::Parse(format!("{e:?}")))?;
+
+    // 2. Canonicalize to typed-AST stages.
+    let stages = lex_ast::canonicalize_program(&program);
+
+    // 3. Type-check — rejects dishonest effect rows (a `[io]` signature
+    //    hiding a `[net]` call), exactly as the toolchain would.
+    lex_types::check_program(&stages)
+        .map_err(|errs| CheckError::TypeCheck(format!("{} error(s): {:?}", errs.len(), errs)))?;
+
+    // 4. Collect the program's declared effects.
+    Ok(collect_effects(&stages))
+}
+
 /// Build a typed [`EffectSet`] from the declared effects of every
 /// function in the canonicalized program.
 fn collect_effects(stages: &[lex_ast::Stage]) -> EffectSet {
@@ -132,7 +148,9 @@ fn collect_effects(stages: &[lex_ast::Stage]) -> EffectSet {
     set
 }
 
-fn report(effects: &EffectSet) -> CheckReport {
+/// Summarise an [`EffectSet`] into the effect-kind / net-host view
+/// a caller reports to a human.
+pub fn report(effects: &EffectSet) -> CheckReport {
     let mut kinds: Vec<String> = effects.concrete.iter().map(|e| e.name.clone()).collect();
     kinds.sort();
     kinds.dedup();

@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "The manifest a human wrote for the nightly QA agent, with the two",
+    "things every hand-written policy accumulates:",
+    "",
+    "  - filesystem Full and exec Full, because the first version of the",
+    "    job shelled out to a test runner and nobody narrowed it after",
+    "    that stopped being true;",
+    "  - legacy-metrics.demo.internal, an egress entry for an endpoint",
+    "    that was decommissioned two quarters ago.",
+    "",
+    "Neither is a mistake anyone made on purpose. They are what a policy",
+    "file does when it is maintained by hand next to code that moves:",
+    "it only ever grows.",
+    "",
+    "`lex-os authority gate` names the two dimensions straight away. The",
+    "stale egress entry it will not touch while the code still carries a",
+    "bare [net] — std.net.get takes its URL at run time, so no allowlist",
+    "entry can be proved unused and shedding one could break the job.",
+    "Once the network call is gone entirely (v3), the proof is available",
+    "and `lex-os authority narrow` empties the list. Refusing to narrow",
+    "what it cannot prove is the discipline, not a gap in it."
+  ],
+  "goal": {
+    "description": "summarise the nightly run and report it",
+    "done_signal": "REPORT_SUBMITTED"
+  },
+  "grant": { "filesystem": "Full", "network": "Allowlist", "exec": "Full" },
+  "budget": { "wall_clock_secs": 300, "max_commands": 50, "max_money_cents": 25, "max_api_calls": 20 },
+  "isolation_floor": "MicroVm",
+  "egress": ["results.demo.internal:443", "legacy-metrics.demo.internal:443"]
+}

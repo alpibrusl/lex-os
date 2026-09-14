@@ -12,6 +12,7 @@
 //! budgets with reprovision-on-death.
 
 mod agent;
+mod authority;
 mod capsule;
 mod demo;
 mod exec;
@@ -316,6 +317,15 @@ enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+    /// Derive, diff and gate the authority a Lex program provably
+    /// needs. `check` asks whether a program fits a grant someone
+    /// wrote; this derives the least grant the code needs from its own
+    /// types, so the sandbox is compiled rather than configured — and
+    /// a change in what the code may reach becomes a reviewable delta.
+    Authority {
+        #[command(subcommand)]
+        what: authority::AuthorityCmd,
+    },
     /// Type-check an agent Lex program against a manifest grant and
     /// refuse it if its effects exceed the grant — the type-check wall
     /// (demo Attempt 1), run *before* the program executes.
@@ -536,6 +546,7 @@ fn main() {
             jail,
             command,
         ),
+        Cmd::Authority { what } => authority::cmd_authority(&fmt, what),
         Cmd::Check { grant, program } => cmd_check(&fmt, grant, program),
         Cmd::Introspect => cmd_introspect(&fmt),
         #[cfg(feature = "firecracker")]
@@ -2053,6 +2064,37 @@ fn cmd_introspect(fmt: &OutputFormat) -> ExitCode {
                 "lex-os audit tail --log audit.json",
             ),
         ]),
+    );
+    tree.add_command(
+        CommandInfo::new(
+            "authority",
+            "Derive the least grant a Lex program provably needs, diff that authority between two versions, gate on the delta, and narrow a manifest to it.",
+        )
+        .conditionally_idempotent()
+        .add_option("grant", "path", "Manifest JSON carrying the approved grant (gate, narrow).", None)
+        .add_option("base", "path", "The previously approved .lex program (diff).", None)
+        .add_option("head", "path", "The proposed .lex program (diff).", None)
+        .add_option("fail-on", "widening|any", "Exit PRECONDITION_FAILED on a delta at or above this severity (diff).", None)
+        .add_option("out", "path", "Where to write the narrowed manifest (narrow).", None)
+        .with_examples(vec![
+            (
+                "Derive the least authority a program needs",
+                "lex-os authority derive agent.lex",
+            ),
+            (
+                "Refuse a change that reaches somewhere new",
+                "lex-os authority diff --base old.lex --head new.lex --fail-on widening",
+            ),
+            (
+                "Gate a program against an approved manifest",
+                "lex-os authority gate --grant manifest.json agent.lex",
+            ),
+            (
+                "Shed the authority the code never uses",
+                "lex-os authority narrow --grant manifest.json agent.lex --out narrowed.json",
+            ),
+        ])
+        .with_see_also(vec!["check", "resolve", "run"]),
     );
     tree.add_command(
         CommandInfo::new(

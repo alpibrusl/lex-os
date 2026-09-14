@@ -58,6 +58,11 @@ const HELP_PATHS: &[&[&str]] = &[
     &["audit", "checkpoint"],
     &["audit", "render"],
     &["audit", "tail"],
+    &["authority"],
+    &["authority", "derive"],
+    &["authority", "diff"],
+    &["authority", "gate"],
+    &["authority", "narrow"],
     &["check"],
     &["capsule"],
     &["capsule", "keygen"],
@@ -224,4 +229,47 @@ fn documented_exit_codes_hold() {
         code, 0,
         "honest program should pass the type-check wall:\n{out}"
     );
+
+    // The authority gate refuses with the same code the wall does — the
+    // README's CI snippet turns on exit 8 meaning "refused", so it has to
+    // mean that from `authority` too, not just from `check`.
+    let root = repo_root();
+    let manifest = root.join("demo/authority/manifest.json");
+    let manifest = manifest.to_str().unwrap();
+    let v1 = root.join("demo/authority/v1_approved.lex");
+    let v1 = v1.to_str().unwrap();
+    let v2 = root.join("demo/authority/v2_agent_improved.lex");
+    let v2 = v2.to_str().unwrap();
+
+    let (out, code) = run(&["authority", "derive", v1]);
+    assert_eq!(code, 0, "deriving authority should exit 0:\n{out}");
+
+    let (out, code) = run(&["authority", "gate", "--grant", manifest, v1]);
+    assert_eq!(code, 0, "the approved version should pass the gate:\n{out}");
+
+    let (out, code) = run(&["authority", "gate", "--grant", manifest, v2]);
+    assert_eq!(
+        code, 8,
+        "a program reaching outside the allowlist should be refused (exit 8):\n{out}"
+    );
+
+    let (out, code) = run(&[
+        "authority",
+        "diff",
+        "--base",
+        v1,
+        "--head",
+        v2,
+        "--fail-on",
+        "widening",
+    ]);
+    assert_eq!(
+        code, 8,
+        "a widening delta should fail the CI gate (exit 8):\n{out}"
+    );
+
+    // Without `--fail-on`, the same delta is reported and exits 0: the
+    // refusal is opt-in, so `diff` stays usable as a PR annotator.
+    let (out, code) = run(&["authority", "diff", "--base", v1, "--head", v2]);
+    assert_eq!(code, 0, "diff without --fail-on should exit 0:\n{out}");
 }

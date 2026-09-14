@@ -13,6 +13,7 @@ Commands:
   audit       Audit-log utilities
   capsule     Capability-addressed distribution (lex-os#34): sign an artifact to the grant it requires, and install it by narrowing a consumer's manifest — refuse, don't downgrade
   exec        Mediate one external command through a manifest's grant, then run it — for real, inside a booted box — if allowed. Unlike `run` (a goal-driven agent loop over named, symbolic commands) and `capsule install --run` (a Lex program entrypoint), this is for a caller that already has a real external command to execute and just wants it grant-gated and audited. Same backend selection as `run`: the real microVM by default, `--simulated` an explicit opt-in
+  authority   Derive, diff and gate the authority a Lex program provably needs. `check` asks whether a program fits a grant someone wrote; this derives the least grant the code needs from its own types, so the sandbox is compiled rather than configured — and a change in what the code may reach becomes a reviewable delta
   check       Type-check an agent Lex program against a manifest grant and refuse it if its effects exceed the grant — the type-check wall (demo Attempt 1), run *before* the program executes
   introspect  Emit the acli command tree for agent discovery
   box-smoke   Standalone Wall-2 proof: boot a real Firecracker microVM with the host-side egress wall, dwell while the guest boots and runs `/sbin/init.demo` (the egress probes), then tear it down. Streams the guest console. Requires `--features firecracker`, a KVM host, and root
@@ -258,6 +259,89 @@ Usage: lex-os audit tail [OPTIONS] --log <LOG>
 Options:
       --log <LOG>        
       --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os authority =====
+Derive, diff and gate the authority a Lex program provably needs. `check` asks whether a program fits a grant someone wrote; this derives the least grant the code needs from its own types, so the sandbox is compiled rather than configured — and a change in what the code may reach becomes a reviewable delta
+
+Usage: lex-os authority [OPTIONS] <COMMAND>
+
+Commands:
+  derive  Derive the least grant a program provably needs, with the evidence that it is tight
+  diff    Diff the authority of two versions of a program — the artifact a reviewer reads next to the source diff
+  gate    Check derived authority against the grant a human approved, and report the authority that grant hands over unused
+  narrow  Rewrite a manifest down to the authority the code provably needs. Narrowing only — this can never hand a program more than the manifest already approved
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os authority derive =====
+Derive the least grant a program provably needs, with the evidence that it is tight
+
+Usage: lex-os authority derive [OPTIONS] <PROGRAM>
+
+Arguments:
+  <PROGRAM>  The `.lex` program to derive authority from
+
+Options:
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os authority diff =====
+Diff the authority of two versions of a program — the artifact a reviewer reads next to the source diff
+
+Usage: lex-os authority diff [OPTIONS] --base <BASE> --head <HEAD>
+
+Options:
+      --base <BASE>
+          The previously approved version
+
+      --output <OUTPUT>
+          Output format (text for humans, json for agents)
+          
+          [default: text]
+          [possible values: text, json]
+
+      --head <HEAD>
+          The proposed version
+
+      --fail-on <FAIL_ON>
+          Exit non-zero on a delta at or above this severity. The CI gate: `--fail-on widening` refuses only new reach; `--fail-on any` pins authority exactly
+
+          Possible values:
+          - widening: Refuse only a delta that reaches somewhere new
+          - any:      Refuse any movement at all, narrowing included — for code whose authority is pinned by an external approval
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+===== lex-os authority gate =====
+Check derived authority against the grant a human approved, and report the authority that grant hands over unused
+
+Usage: lex-os authority gate [OPTIONS] --grant <GRANT> <PROGRAM>
+
+Arguments:
+  <PROGRAM>  The `.lex` program to gate
+
+Options:
+      --grant <GRANT>    Manifest JSON carrying the approved grant + egress allowlist
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+  -h, --help             Print help
+
+===== lex-os authority narrow =====
+Rewrite a manifest down to the authority the code provably needs. Narrowing only — this can never hand a program more than the manifest already approved
+
+Usage: lex-os authority narrow [OPTIONS] --grant <GRANT> <PROGRAM>
+
+Arguments:
+  <PROGRAM>  The `.lex` program whose derivation sets the new floor
+
+Options:
+      --grant <GRANT>    Manifest JSON to tighten
+      --output <OUTPUT>  Output format (text for humans, json for agents) [default: text] [possible values: text, json]
+      --out <OUT>        Where to write the narrowed manifest. Defaults to stdout. (`--out`, not `-o`: the global `--output` selects the acli output format.)
   -h, --help             Print help
 
 ===== lex-os check =====

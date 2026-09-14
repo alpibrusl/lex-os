@@ -934,6 +934,7 @@ dependencies = [
  "lex-ast",
  "lex-bytecode",
  "lex-os-audit",
+ "lex-os-authority",
  "lex-os-capsule",
  "lex-os-check",
  "lex-os-manifest",
@@ -958,6 +959,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lex-os-authority"
+version = "0.1.0"
+dependencies = [
+ "lex-os-check",
+ "lex-os-manifest",
+ "lex-types",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

@@ -99,6 +99,7 @@ another axis is refused when the manifest is read
 | [`lex-os-manifest`](crates/lex-os-manifest) | The trust manifest: goal + capability **grant** + **budget** (integer cents) + reversibility + isolation floor. Content-addressable. Re-exports the trust lattice from `lex-types`. |
 | [`lex-os-audit`](crates/lex-os-audit) | Tamper-evident, **hash-chained** external audit log. An agent editing its own logs is designed out — append-only, no edit/truncate API. Entries can be **sealed** (Ed25519) and the log **checkpointed**, which is what stops a holder who recomputes and a tail that goes missing (lex-os#54). |
 | [`lex-os-check`](crates/lex-os-check) | The **type-check wall**: runs an agent's `.lex` program through the real Lex front-end (`lex-syntax` → `lex-ast` → `lex-types`) and refuses it if its declared effects exceed the grant — *before* it runs. Backs the `check` command. |
+| [`lex-os-authority`](crates/lex-os-authority) | The other direction: derives the **least grant a program provably needs** from its own effect rows (minimal by construction, with a witness), diffs that authority between two versions, gates on the delta, and narrows a manifest down to it. Backs the `authority` command — see [`demo/authority`](demo/authority). |
 | [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: `SandboxPolicy::from_grant` is the single grant→OS-policy mapping. Pluggable isolation backends behind the `Perimeter` trait — a portable simulated one and a real Firecracker microVM (feature `firecracker`). |
 | [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied — every failure mode is an error, never a silent weakening. |
 | [`lex-os-capsule`](crates/lex-os-capsule) | **Capability-addressed distribution**: binds a distributable artifact to the trust **grant** it requires, signed (Ed25519). Installing it **narrows** a consumer's manifest — refuse, don't downgrade — so a third-party package runs at *least authority*, bounded by the consumer's grant rather than its own declaration. |
@@ -124,6 +125,84 @@ and `lex-ast` as git dependencies of `lex-lang`. The trust lattice that
 drives **both** the static Lex type check **and** the supervisor's
 derived sandbox lives in `lex-lang`'s `lex-types` crate
 (`lex_types::trust`) — one declaration, two enforcement layers.
+
+## Authority review — the sandbox is compiled, not configured
+
+`check` asks whether a program fits a grant someone wrote. `authority`
+asks the questions that need an effect system to answer at all:
+
+```sh
+lex-os authority derive agent.lex            # least grant the code provably needs
+lex-os authority diff --base old.lex --head new.lex --fail-on widening
+lex-os authority gate   --grant manifest.json agent.lex
+lex-os authority narrow --grant manifest.json agent.lex --out narrowed.json
+```
+
+The derivation is a fold over the declared effect rows the type checker
+has already proved honest, so it covers every path rather than the one a
+trace happened to take — and it is **minimal**: lower any dimension one
+rank and a declared effect stops being permitted (`authority derive`
+prints the witness). The delta between two versions is then a review
+artifact a CI job can refuse on, and `narrow` moves a manifest in the
+direction a hand-maintained policy never goes: *down*.
+
+```sh
+bash demo/authority/run.sh   # three acts, no KVM, no network, no box
+```
+
+The demo's `baseline/` is the same change under the strongest authority
+model in wide use — **Deno**, with `--allow-net=host`, `--allow-read`,
+`--allow-env`, default deny. Deno refuses the new host at run time, and
+that wall holds. What it cannot do is say what the program needs
+(`fetch(url)` takes a runtime value, so no tool can read the host set
+off the source), scope authority to a function rather than the process,
+produce a delta a CI job can refuse on, or ever shed a flag. The
+Python-behind-a-container case is in `baseline/python-docker/` and is
+strictly weaker than that.
+
+### The same derivation, upstream
+
+The fold lives in `lex-lang`'s `lex_types::authority`, so the authoring
+toolchain answers the same question without lex-os in the loop:
+
+```sh
+lex authority derive src/                                  # least grant, per package
+lex authority diff --base old/ --head src/ --fail-on widening
+```
+
+`lex authority` additionally names the **contributors** — which function
+is why each effect is in the answer — because "this package needs `net`"
+is a worse review than "`push_telemetry` needs `net`". lex-os adds the
+half that needs a manifest: `gate` and `narrow`.
+
+### Running a non-Lex agent in the box
+
+The two enforcement points do different jobs, and only one of them
+applies to an arbitrary binary:
+
+| Workload | Static wall (`check` / `authority`) | Perimeter (grant → sandbox) | Audit chain |
+| --- | --- | --- | --- |
+| Lex agent code | **yes** — effects derived and gated before it runs | yes | yes |
+| Any binary — node, python, a coding agent | **no** — there is nothing to derive from | yes | yes |
+
+So a coding agent running inside lex-os gets the runtime half in full: a
+disposable microVM, an egress allowlist that is the only route out, a
+budget in integer cents, `exec` mediation with a reversibility
+classification, and a hash-chained log on the far side of a boundary it
+has no syscall to reach. That is exactly what "free inside the box,
+sealed at the edge" is for — interior freedom costs nothing when the
+edge is the boundary. What it does *not* get is a derived grant: no
+effect rows, nothing to fold, so the perimeter is the whole static
+story for the binary itself.
+
+The static half applies to the other side of that box — **what the agent
+writes**. If its output is Lex, the authority delta on its branch
+answers the question the agent cannot answer about itself:
+
+```text
+lex-os run          → the agent works inside a sealed box (perimeter + budget + audit)
+lex authority diff  → what it produced is gated on the authority delta, before merge
+```
 
 ## Try it
 
