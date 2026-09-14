@@ -75,3 +75,9 @@ jobs:
 
       - name: The authority demo still runs
         run: bash demo/authority/run.sh
+
+      # The side-by-side is the pitch artifact, and it is built entirely
+      # from real command output — so it breaks the moment either side's
+      # output moves. Run it here for the same reason run.sh is run here.
+      - name: The side-by-side comparison still runs
+        run: bash demo/authority/sidebyside.sh
