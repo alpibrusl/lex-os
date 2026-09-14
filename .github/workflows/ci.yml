@@ -59,3 +59,11 @@ jobs:
             fi
             echo "correctly refused: $bad"
           done
+
+      # The authority demo is entirely static — no KVM, no network, no
+      # box — so the runbook a stranger is invited to run is run here on
+      # every PR rather than trusted to still work. `demo_acts.rs` already
+      # asserts the three verdicts against the same fixture files; this
+      # catches the other half, a script that no longer executes.
+      - name: The authority demo still runs
+        run: bash demo/authority/run.sh

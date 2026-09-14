@@ -99,6 +99,7 @@ another axis is refused when the manifest is read
 | [`lex-os-manifest`](crates/lex-os-manifest) | The trust manifest: goal + capability **grant** + **budget** (integer cents) + reversibility + isolation floor. Content-addressable. Re-exports the trust lattice from `lex-types`. |
 | [`lex-os-audit`](crates/lex-os-audit) | Tamper-evident, **hash-chained** external audit log. An agent editing its own logs is designed out — append-only, no edit/truncate API. Entries can be **sealed** (Ed25519) and the log **checkpointed**, which is what stops a holder who recomputes and a tail that goes missing (lex-os#54). |
 | [`lex-os-check`](crates/lex-os-check) | The **type-check wall**: runs an agent's `.lex` program through the real Lex front-end (`lex-syntax` → `lex-ast` → `lex-types`) and refuses it if its declared effects exceed the grant — *before* it runs. Backs the `check` command. |
+| [`lex-os-authority`](crates/lex-os-authority) | The other direction: derives the **least grant a program provably needs** from its own effect rows (minimal by construction, with a witness), diffs that authority between two versions, gates on the delta, and narrows a manifest down to it. Backs the `authority` command — see [`demo/authority`](demo/authority). |
 | [`lex-os-perimeter`](crates/lex-os-perimeter) | The box's edge: `SandboxPolicy::from_grant` is the single grant→OS-policy mapping. Pluggable isolation backends behind the `Perimeter` trait — a portable simulated one and a real Firecracker microVM (feature `firecracker`). |
 | [`lex-os-resolver`](crates/lex-os-resolver) | Negotiates a manifest against the real host and **refuses to downgrade** when it can't be satisfied — every failure mode is an error, never a silent weakening. |
 | [`lex-os-capsule`](crates/lex-os-capsule) | **Capability-addressed distribution**: binds a distributable artifact to the trust **grant** it requires, signed (Ed25519). Installing it **narrows** a consumer's manifest — refuse, don't downgrade — so a third-party package runs at *least authority*, bounded by the consumer's grant rather than its own declaration. |
@@ -124,6 +125,34 @@ and `lex-ast` as git dependencies of `lex-lang`. The trust lattice that
 drives **both** the static Lex type check **and** the supervisor's
 derived sandbox lives in `lex-lang`'s `lex-types` crate
 (`lex_types::trust`) — one declaration, two enforcement layers.
+
+## Authority review — the sandbox is compiled, not configured
+
+`check` asks whether a program fits a grant someone wrote. `authority`
+asks the questions that need an effect system to answer at all:
+
+```sh
+lex-os authority derive agent.lex            # least grant the code provably needs
+lex-os authority diff --base old.lex --head new.lex --fail-on widening
+lex-os authority gate   --grant manifest.json agent.lex
+lex-os authority narrow --grant manifest.json agent.lex --out narrowed.json
+```
+
+The derivation is a fold over the declared effect rows the type checker
+has already proved honest, so it covers every path rather than the one a
+trace happened to take — and it is **minimal**: lower any dimension one
+rank and a declared effect stops being permitted (`authority derive`
+prints the witness). The delta between two versions is then a review
+artifact a CI job can refuse on, and `narrow` moves a manifest in the
+direction a hand-maintained policy never goes: *down*.
+
+```sh
+bash demo/authority/run.sh   # three acts, no KVM, no network, no box
+```
+
+The demo's `baseline/` is the same change in Python behind a Dockerfile,
+a seccomp profile and a NetworkPolicy: the source diff is a dozen lines,
+the policy diff is empty, and there is no third artifact to diff.
 
 ## Try it
 

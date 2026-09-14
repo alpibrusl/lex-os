@@ -1,0 +1,21 @@
+# The egress policy for the QA agent pod. The closest thing this stack
+# has to lex-os's `egress` allowlist — and the closest it gets to the
+# authority question. Note what it cannot say: which *code path* reaches
+# which host, and therefore whether a change added one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qa-agent-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: qa-agent
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: results
+      ports:
+        - protocol: TCP
+          port: 443

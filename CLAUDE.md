@@ -44,6 +44,17 @@ set its own limits, stop.
 - `crates/lex-os-check` — the static grant↔effect wall: reject agent Lex
   code whose effects exceed the manifest grant, before it runs. Same
   grant as the runtime gates — one declaration, two enforcement points.
+- `crates/lex-os-authority` — the inverse of `lex-os-check`: instead of
+  asking whether a program fits a grant a human wrote, it **derives**
+  the least grant the program provably needs from its own effect rows,
+  **diffs** that authority between two versions (widening / narrowing /
+  unchanged), gates on the delta, and **narrows** a manifest to it.
+  Narrowing only, in both directions: `narrow_manifest` takes the meet
+  with the existing grant, so it can never hand a program more than was
+  approved, and it refuses to shed an egress entry it cannot prove
+  unused (a bare `[net]` binds no host at the type level). The demo and
+  its fixtures are the same files: `crates/lex-os-authority/tests/`
+  reads `demo/authority/*.lex`, so a drifted runbook is a red build.
 - `crates/lex-os-capsule` — capability-addressed distribution: a signed
   contract binding an artifact to the grant it requires; installing
   *narrows* the consumer's manifest. Refuse, don't downgrade.
