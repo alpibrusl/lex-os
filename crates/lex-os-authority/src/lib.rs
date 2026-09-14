@@ -41,6 +41,20 @@
 //!   lex-os run                →  perimeter derived from *that* manifest
 //! ```
 //!
+//! ## Where the fold lives
+//!
+//! The derivation and the diff are also defined upstream, in
+//! `lex_types::authority` (alpibrusl/lex-lang#857) — the same place the
+//! trust lattice itself lives, so `lex authority derive` and this crate
+//! answer the same question the same way. This crate keeps its own copy
+//! of the fold only because lex-os pins `lex-types` to a released tag
+//! and that module is not in the pinned one yet; when the pin next
+//! moves, [`derive_from_effects`], [`diff`] and their types collapse
+//! into re-exports and upstream becomes the single definition. The
+//! manifest-aware half — [`gate`] and [`narrow_manifest`] — stays here
+//! either way, because only lex-os knows what box the code was approved
+//! for.
+//!
 //! ## What this crate deliberately does not claim
 //!
 //! The trust lattice ranks three dimensions — filesystem, network,
