@@ -1974,11 +1974,14 @@ fn cmd_check(fmt: &OutputFormat, grant: PathBuf, program: PathBuf) -> ExitCode {
             )
         }
     };
-    let src = match std::fs::read_to_string(&program) {
-        Ok(s) => s,
-        Err(e) => return emit_err(fmt, "check", ExitCode::NotFound, &e.to_string()),
-    };
-    match lex_os_check::check_source_against_manifest(&src, &manifest) {
+    // Confirm the entry is readable first, so a missing program still exits
+    // `NotFound`; the program is then loaded BY PATH so its imports resolve
+    // (#117). Checking one file of a package would miss the effects its
+    // modules declare, which is exactly what the grant has to cover.
+    if let Err(e) = std::fs::read_to_string(&program) {
+        return emit_err(fmt, "check", ExitCode::NotFound, &e.to_string());
+    }
+    match lex_os_check::check_path_against_manifest(&program, &manifest) {
         Ok(report) => {
             let data = json!({
                 "ok": true,

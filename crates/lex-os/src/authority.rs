@@ -24,7 +24,7 @@ use clap::{Subcommand, ValueEnum};
 use serde_json::json;
 
 use lex_os_authority::{
-    derive, diff, gate, narrow_manifest, Authority, AuthorityDiff, GateReport, Verdict,
+    derive_path, diff, gate, narrow_manifest, Authority, AuthorityDiff, GateReport, Verdict,
 };
 use lex_os_manifest::Manifest;
 
@@ -110,11 +110,12 @@ pub fn cmd_authority(fmt: &OutputFormat, what: AuthorityCmd) -> ExitCode {
 
 fn run_derive(fmt: &OutputFormat, program: &Path) -> ExitCode {
     let start = Instant::now();
-    let src = match read(fmt, "authority.derive", program) {
-        Ok(s) => s,
-        Err(code) => return code,
-    };
-    let (authority, effects) = match derive(&src) {
+    if let Err(code) = ensure_readable(fmt, "authority.derive", program) {
+        return code;
+    }
+    // By PATH, not by source: `derive` on a string sees one file, and a
+    // package's imported modules carry effects the box will still exercise.
+    let (authority, effects) = match derive_path(program) {
         Ok(a) => a,
         Err(e) => {
             return emit_err(
@@ -354,6 +355,13 @@ fn run_narrow(fmt: &OutputFormat, grant: &Path, program: &Path, output: Option<&
 
 // ------------------------------------------------------------ helpers
 
+/// Confirm the entry file exists and is readable, so a missing program
+/// still exits `NotFound`. The program itself is then loaded by path, not
+/// from this string, because loading resolves imports (#117).
+fn ensure_readable(fmt: &OutputFormat, cmd: &str, path: &Path) -> Result<(), ExitCode> {
+    read(fmt, cmd, path).map(|_| ())
+}
+
 fn read(fmt: &OutputFormat, cmd: &str, path: &Path) -> Result<String, ExitCode> {
     std::fs::read_to_string(path).map_err(|e| {
         emit_err(
@@ -378,8 +386,8 @@ fn read_manifest(fmt: &OutputFormat, cmd: &str, path: &Path) -> Result<Manifest,
 }
 
 fn derive_file(fmt: &OutputFormat, path: &Path) -> Result<Authority, ExitCode> {
-    let src = read(fmt, "authority", path)?;
-    derive(&src).map(|(a, _)| a).map_err(|e| {
+    ensure_readable(fmt, "authority", path)?;
+    derive_path(path).map(|(a, _)| a).map_err(|e| {
         emit_err(
             fmt,
             "authority",

@@ -204,6 +204,18 @@ pub fn derive(src: &str) -> Result<(Authority, EffectSet), AuthorityError> {
     Ok((authority, effects))
 }
 
+/// The same, for a program on disk, **with its imports resolved**.
+///
+/// Use this for anything a user names on the command line. A grant
+/// derived from the entry file alone understates a multi-file package:
+/// a `[net]` call in an imported module is still a call the box will
+/// make, and the least authority has to cover the whole program (#117).
+pub fn derive_path(entry: &std::path::Path) -> Result<(Authority, EffectSet), AuthorityError> {
+    let effects = lex_os_check::effects_of_path(entry)?;
+    let authority = derive_from_effects(&effects)?;
+    Ok((authority, effects))
+}
+
 /// The fold itself, over an [`EffectSet`] a caller already has.
 ///
 /// Each effect names a dimension and the minimum level it needs; the

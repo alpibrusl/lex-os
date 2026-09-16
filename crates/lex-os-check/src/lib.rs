@@ -44,6 +44,14 @@ pub struct CheckReport {
 pub enum CheckError {
     #[error("parse error: {0}")]
     Parse(String),
+    /// An import could not be resolved: a sibling module that is not on
+    /// disk, or a package that has not been installed. Distinguished from
+    /// [`CheckError::TypeCheck`] because the two call for completely
+    /// different fixes, and surfacing an unresolved import as a list of
+    /// `UnknownIdentifier`s reads as "your program is broken" when the
+    /// program is fine and the environment is not (#117).
+    #[error("could not load program: {0}")]
+    Load(String),
     /// The program's body does not honour its declared effect rows (a
     /// dishonest signature) — caught by the Lex type checker, the same
     /// way `lex check` would reject it.
@@ -64,6 +72,15 @@ pub fn check_source_against_manifest(
     check_source_against_grant(src, &manifest.grant, &manifest.egress)
 }
 
+/// The same, for a program on disk, **with its imports resolved** — the
+/// entry point anything user-facing should use (#117).
+pub fn check_path_against_manifest(
+    entry: &std::path::Path,
+    manifest: &Manifest,
+) -> Result<CheckReport, CheckError> {
+    check_effects_against_grant(effects_of_path(entry)?, &manifest.grant, &manifest.egress)
+}
+
 /// Lower-level entry: check against an explicit grant + egress allowlist.
 pub fn check_source_against_grant(
     src: &str,
@@ -71,8 +88,19 @@ pub fn check_source_against_grant(
     egress: &[String],
 ) -> Result<CheckReport, CheckError> {
     // 1-4. Parse, canonicalize, type-check, collect declared effects.
-    let effects = effects_of_source(src)?;
+    check_effects_against_grant(effects_of_source(src)?, grant, egress)
+}
 
+/// Step 5 alone, over an [`EffectSet`] a caller already has.
+///
+/// Extracted so a file (imports resolved) and a string (one file) reach
+/// exactly the same wall. The comparison must not depend on how the
+/// program was loaded.
+fn check_effects_against_grant(
+    effects: EffectSet,
+    grant: &Grant,
+    egress: &[String],
+) -> Result<CheckReport, CheckError> {
     // 5a. Coarse wall: every effect must fit the grant's dimensions and
     //     levels (bare `[net]` needs network ≥ allowlist, `[proc]` needs
     //     exec, `[fs_write]` needs read-write, …).
@@ -115,9 +143,35 @@ pub fn check_source_against_grant(
 pub fn effects_of_source(src: &str) -> Result<EffectSet, CheckError> {
     // 1. Parse.
     let program = lex_syntax::parse_source(src).map_err(|e| CheckError::Parse(format!("{e:?}")))?;
+    effects_of_program(&program)
+}
 
+/// The same, for a program on disk — **with its imports resolved**.
+///
+/// Prefer this over [`effects_of_source`] for anything a user names on
+/// the command line. `parse_source` reads one file and knows nothing
+/// about `./sibling` modules or installed packages, so every real Lex
+/// package failed the wall before analysis even began, with a list of
+/// `UnknownIdentifier`s that read as if the program were broken (#117).
+/// `lex_syntax::load_program` resolves imports the way `lex check` does
+/// — relative to the entry file, honouring the package cache — so the
+/// effects collected here are the whole program's, not one file's.
+///
+/// That matters beyond ergonomics: effects are what the grant is derived
+/// from and checked against. A `[net]` call in an imported module is
+/// still a `[net]` call the box will make, and a single-file view of a
+/// multi-file package cannot see it. Deriving an authority from the
+/// entry file alone would understate the program.
+pub fn effects_of_path(entry: &std::path::Path) -> Result<EffectSet, CheckError> {
+    let program = lex_syntax::load_program(entry).map_err(|e| CheckError::Load(format!("{e}")))?;
+    effects_of_program(&program)
+}
+
+/// Steps 2-4, shared by both entry points so a file and a string are
+/// analysed identically once loaded.
+fn effects_of_program(program: &lex_syntax::Program) -> Result<EffectSet, CheckError> {
     // 2. Canonicalize to typed-AST stages.
-    let stages = lex_ast::canonicalize_program(&program);
+    let stages = lex_ast::canonicalize_program(program);
 
     // 3. Type-check — rejects dishonest effect rows (a `[io]` signature
     //    hiding a `[net]` call), exactly as the toolchain would.
@@ -173,6 +227,111 @@ pub fn report(effects: &EffectSet) -> CheckReport {
 
 #[cfg(test)]
 mod tests {
+
+    /// A throwaway package directory, mirroring the tmp-dir idiom used in
+    /// `lex-os/tests/capsule_audit.rs`.
+    fn pkg_dir(tag: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("lexos-check-imports-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("mkdir");
+        d
+    }
+
+    /// #117: a program that imports a sibling module must analyse, and the
+    /// effects must include the ones the SIBLING declares.
+    ///
+    /// The entry file below has no effects of its own — `[net]` is declared
+    /// only in `wire.lex`. A single-file view sees a pure program and would
+    /// derive an empty grant for something that dials the network, so this
+    /// pins the whole-program view rather than merely "it no longer errors".
+    #[test]
+    fn imported_modules_contribute_their_effects() {
+        let dir = pkg_dir("siblings");
+        std::fs::write(
+            dir.join("wire.lex"),
+            "import \"std.net\" as net\n\
+             fn fetch(u :: Str) -> [net] Result[Str, Str] { net.get(u) }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lex"),
+            "import \"./wire\" as wire\n\
+             fn go(u :: Str) -> [net] Result[Str, Str] { wire.fetch(u) }\n",
+        )
+        .unwrap();
+
+        let effects = effects_of_path(&dir.join("main.lex"))
+            .expect("a package with a sibling import must analyse");
+        let names: Vec<&str> = effects.concrete.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"net"),
+            "the sibling's [net] must reach the effect set, got {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same program read as a STRING cannot see the sibling at all.
+    ///
+    /// This is the behaviour that made `derive` and `check` unusable on every
+    /// real package, and it is why the path entry point exists. Pinned so the
+    /// two are not quietly collapsed back into one.
+    #[test]
+    fn reading_one_file_as_a_string_cannot_resolve_a_sibling() {
+        let src = "import \"./wire\" as wire\n\
+                   fn go(u :: Str) -> [net] Result[Str, Str] { wire.fetch(u) }\n";
+        assert!(
+            effects_of_source(src).is_err(),
+            "a string source has no base path and must not silently succeed"
+        );
+    }
+
+    /// An unresolvable import is reported as a LOAD failure, not as a pile of
+    /// `UnknownIdentifier` type errors. The distinction matters because the
+    /// fixes differ completely — install the package versus fix the code —
+    /// and the old message accused the program of being broken when it was
+    /// the environment that was incomplete.
+    #[test]
+    fn a_missing_import_is_a_load_error_not_a_type_error() {
+        let dir = pkg_dir("missing");
+        std::fs::write(
+            dir.join("main.lex"),
+            "import \"./nope\" as n\nfn go() -> Int { n.x() }\n",
+        )
+        .unwrap();
+
+        match effects_of_path(&dir.join("main.lex")) {
+            Err(CheckError::Load(msg)) => {
+                assert!(
+                    msg.contains("nope"),
+                    "the message must name the import that failed, got: {msg}"
+                );
+            }
+            other => panic!("expected a Load error, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A single-file program with no imports still works by path — the fix
+    /// must not regress the case that already worked.
+    #[test]
+    fn a_stdlib_only_program_still_analyses_by_path() {
+        let dir = pkg_dir("nodeps");
+        std::fs::write(
+            dir.join("main.lex"),
+            "import \"std.net\" as net\n\
+             fn go(u :: Str) -> [net] Result[Str, Str] { net.get(u) }\n",
+        )
+        .unwrap();
+
+        let effects = effects_of_path(&dir.join("main.lex")).expect("stdlib-only must analyse");
+        let names: Vec<&str> = effects.concrete.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"net"), "got {names:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
     use lex_os_manifest::{Budget, Goal};
 
