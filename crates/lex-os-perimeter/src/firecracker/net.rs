@@ -196,6 +196,49 @@ pub(super) fn create_tap(
     host_ip_cidr: &str,
     owner: Option<(u32, u32)>,
 ) -> Result<(), NetError> {
+    for step in build_tap_provision_plan(tap, host_ip_cidr, owner) {
+        let outcome = run("ip", &as_str_slice(&step.args));
+        if !step.tolerate_failure {
+            outcome?;
+        }
+    }
+    Ok(())
+}
+
+/// One `ip` invocation in the tap provisioning sequence.
+pub(super) struct TapStep {
+    pub(super) args: Vec<String>,
+    /// `true` for a step that is expected to fail in the ordinary case and
+    /// whose failure must not abort provisioning.
+    pub(super) tolerate_failure: bool,
+}
+
+/// The `ip` invocations that provision the host tap, in order.
+///
+/// The sequence opens by DELETING the device. A crashed or killed run leaves
+/// the tap behind, and a bare `ip tuntap add` then fails with EBUSY for every
+/// future run on that host — so one `kill -9` makes the host unusable until
+/// somebody removes the interface by hand, which is precisely the manual
+/// repair a disposable-box runtime exists to avoid (#118).
+///
+/// Teardown was already idempotent — `teardown_host` "ignores 'already gone'"
+/// at every step — and `install_egress_allowlist` already rebuilds its chain
+/// from empty for this same reason. Provisioning was the one path that was
+/// not, and the one where the consequence is unrecoverable rather than merely
+/// untidy.
+///
+/// Deleted and recreated rather than reused on EBUSY: a stale tap can carry
+/// addresses or flags from a previous grant, and a perimeter that inherits
+/// half of an earlier one is the hazard the egress chain comment already
+/// names.
+///
+/// Built as data so the ordering — in particular that the delete precedes the
+/// add — is testable on a host with no CAP_NET_ADMIN.
+pub(super) fn build_tap_provision_plan(
+    tap: &str,
+    host_ip_cidr: &str,
+    owner: Option<(u32, u32)>,
+) -> Vec<TapStep> {
     let mut add = vec![
         "tuntap".to_string(),
         "add".into(),
@@ -211,10 +254,36 @@ pub(super) fn create_tap(
             gid.to_string(),
         ]);
     }
-    run("ip", &as_str_slice(&add))?;
-    run("ip", &["addr", "add", host_ip_cidr, "dev", tap])?;
-    run("ip", &["link", "set", tap, "up"])?;
-    Ok(())
+    vec![
+        TapStep {
+            args: build_tap_delete_args(tap),
+            tolerate_failure: true,
+        },
+        TapStep {
+            args: add,
+            tolerate_failure: false,
+        },
+        TapStep {
+            args: vec![
+                "addr".to_string(),
+                "add".into(),
+                host_ip_cidr.into(),
+                "dev".into(),
+                tap.into(),
+            ],
+            tolerate_failure: false,
+        },
+        TapStep {
+            args: vec!["link".to_string(), "set".into(), tap.into(), "up".into()],
+            tolerate_failure: false,
+        },
+    ]
+}
+
+/// Removing the tap, as argv. Shared by `destroy_tap` and by the reclaim step
+/// of `build_tap_provision_plan`, so the two cannot drift apart.
+pub(super) fn build_tap_delete_args(tap: &str) -> Vec<String> {
+    vec!["link".to_string(), "delete".into(), tap.into()]
 }
 
 /// Apply the egress wall.
@@ -425,7 +494,7 @@ pub(super) fn scoped_delete_args(forward_listing: &str, tap: &str) -> Vec<Vec<St
 
 /// Remove the tap interface.
 pub(super) fn destroy_tap(tap: &str) -> Result<(), NetError> {
-    run("ip", &["link", "delete", tap])?;
+    run("ip", &as_str_slice(&build_tap_delete_args(tap)))?;
     Ok(())
 }
 
@@ -456,6 +525,94 @@ fn as_str_slice(v: &[String]) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #118 in one assertion: provisioning reclaims a leftover tap.
+    ///
+    /// A crashed run leaves the device behind and `ip tuntap add` then
+    /// returns EBUSY forever, so the host needs a manual `ip link delete`
+    /// before it can run anything again. The delete must therefore come
+    /// FIRST, and must be allowed to fail — on a clean host there is nothing
+    /// to remove, and treating that as an error would break every normal run.
+    #[test]
+    fn provisioning_reclaims_a_leftover_tap_before_adding() {
+        let plan = build_tap_provision_plan("tap-lex0", "10.0.0.1/30", None);
+
+        let first = &plan[0];
+        assert_eq!(first.args, vec!["link", "delete", "tap-lex0"]);
+        assert!(
+            first.tolerate_failure,
+            "a clean host has no tap to delete; that must not fail the run"
+        );
+
+        let add = plan
+            .iter()
+            .position(|s| s.args.first().map(String::as_str) == Some("tuntap"))
+            .expect("the plan must add a tap");
+        assert_eq!(
+            add, 1,
+            "the delete has to precede the add, or it is useless"
+        );
+    }
+
+    /// Every step after the reclaim is load-bearing and must abort the run.
+    /// If `tolerate_failure` leaked onto the add or the address, a box would
+    /// come up with no usable interface and the perimeter would be silent
+    /// about it.
+    #[test]
+    fn only_the_reclaim_step_may_fail() {
+        let plan = build_tap_provision_plan("tap-lex0", "10.0.0.1/30", None);
+        let tolerated: Vec<_> = plan
+            .iter()
+            .filter(|s| s.tolerate_failure)
+            .map(|s| s.args.join(" "))
+            .collect();
+        assert_eq!(tolerated, vec!["link delete tap-lex0"]);
+    }
+
+    /// The reclaim and the teardown delete the same device the same way.
+    /// They were separate string literals before; this pins them to one
+    /// builder so a rename cannot leave provisioning reclaiming an interface
+    /// teardown never removes.
+    #[test]
+    fn the_reclaim_and_the_teardown_agree() {
+        let plan = build_tap_provision_plan("tap-lex7", "10.0.0.1/30", None);
+        assert_eq!(plan[0].args, build_tap_delete_args("tap-lex7"));
+    }
+
+    /// The jailed case: firecracker has dropped privilege by the time it
+    /// opens the tap, so the device must already be owned by that uid/gid.
+    /// Reclaiming must not have disturbed how the add is built.
+    #[test]
+    fn a_jailed_run_still_gets_an_owned_tap() {
+        let plan = build_tap_provision_plan("tap-lex0", "10.0.0.1/30", Some((994, 107)));
+        assert_eq!(
+            plan[1].args,
+            vec!["tuntap", "add", "tap-lex0", "mode", "tap", "user", "994", "group", "107"]
+        );
+
+        let unjailed = build_tap_provision_plan("tap-lex0", "10.0.0.1/30", None);
+        assert_eq!(
+            unjailed[1].args,
+            vec!["tuntap", "add", "tap-lex0", "mode", "tap"]
+        );
+    }
+
+    /// The whole sequence, so a reordering has to be deliberate: the address
+    /// is added to a device that exists, and the link is brought up last.
+    #[test]
+    fn the_plan_is_reclaim_add_address_up() {
+        let plan = build_tap_provision_plan("tap-lex0", "10.0.0.1/30", None);
+        let argv: Vec<String> = plan.iter().map(|s| s.args.join(" ")).collect();
+        assert_eq!(
+            argv,
+            vec![
+                "link delete tap-lex0",
+                "tuntap add tap-lex0 mode tap",
+                "addr add 10.0.0.1/30 dev tap-lex0",
+                "link set tap-lex0 up",
+            ]
+        );
+    }
 
     #[test]
     fn build_iptables_accept_rule_allowlists_one_host_port() {
@@ -693,5 +850,22 @@ mod tests {
     fn create_and_destroy_tap_on_host() {
         create_tap("tap-lex-test", "169.254.42.1/30", None).expect("create");
         destroy_tap("tap-lex-test").expect("destroy");
+    }
+
+    /// The #118 regression, against a real kernel: simulate the crashed run
+    /// by provisioning and then NOT tearing down, and provision again. Before
+    /// the reclaim step this second call failed with
+    /// `ioctl(TUNSETIFF): Device or resource busy`, and went on failing for
+    /// every run on the host until somebody deleted the interface by hand.
+    #[test]
+    #[ignore = "requires root + iproute2 + iptables; run on the KVM host"]
+    fn a_leaked_tap_does_not_brick_the_next_run() {
+        create_tap("tap-lex-leak", "169.254.42.5/30", None).expect("first provision");
+
+        // Deliberately skip teardown: this is the crashed / kill -9 case.
+        create_tap("tap-lex-leak", "169.254.42.5/30", None)
+            .expect("a leftover tap must be reclaimed, not fatal");
+
+        destroy_tap("tap-lex-leak").expect("destroy");
     }
 }
