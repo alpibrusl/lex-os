@@ -1,5 +1,18 @@
 # Firecracker microVM Perimeter — Implementation Plan
 
+> **Status: implemented.** Every unchecked box below stayed unchecked
+> because the plan was executed but never marked up, not because the
+> work is outstanding — `crates/lex-os-perimeter/src/firecracker/
+> {mod,api,net,vm,jail}.rs` (~1,900 lines) is the real, current code,
+> touched by commits well after this plan was written. One thing
+> changed from what's planned here: `jail.rs` adds `jailer`
+> integration (chroot + privilege drop before exec'ing firecracker),
+> which this plan's own "resolved design choices" ruled out ("lex-os
+> runs as root... jailer for capability dropping" listed as
+> out-of-scope) — the plan was a starting point, not a ceiling. Read
+> this document as a historical record of the design, not a live task
+> list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the in-process `FirecrackerPerimeter` skeleton with a real microVM backend that (a) boots a Firecracker VM via its HTTP API, (b) wires a tap device under host-side iptables matching the grant's egress allowlist, and (c) tears down cleanly. This makes Wall 2 of the lex-os demo (`curl evil.com` dies at the kernel) materially true.

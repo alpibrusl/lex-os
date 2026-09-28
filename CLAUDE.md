@@ -65,6 +65,10 @@ set its own limits, stop.
   reasoning loop. It is on the untrusted side of the boundary; never
   give it authority the supervisor is supposed to mediate.
 - `crates/lex-os` — the CLI; emits acli envelopes and semantic exit codes.
+- `crates/results-stub` — not part of the trust lattice: a tiny hand-rolled
+  HTTP/1.1 stub impersonating `results.demo.internal`, the demo manifest's
+  one allowed egress host (#10). Logs each request to stdout so the demo
+  runbook stays self-contained with no real network dependency.
 - `manifests/` — the manifest format + bounded commands as a Lex package.
 
 ## The loop
